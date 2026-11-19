@@ -27,6 +27,7 @@ class BeaconSchedulerService:
         self._poll_interval = poll_interval
         self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
+        self._pending_beacon_noted = False
 
     async def start(self) -> None:
         if self._task is not None:
@@ -47,7 +48,15 @@ class BeaconSchedulerService:
 
     async def _run(self) -> None:
         while not self._stop_event.is_set():
-            await asyncio.to_thread(self._tick)
+            try:
+                await asyncio.to_thread(self._tick)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # one failed tick (e.g. database busy) must not stop the beacon scheduler for good
+                try:
+                    log_event("WARNING", "outbound", f"Beacon scheduler tick failed: {exc!r}. Retrying.")
+                except Exception:
+                    pass
             await self._sleep(self._poll_interval)
 
     def _tick(self) -> None:
@@ -58,6 +67,12 @@ class BeaconSchedulerService:
         now = datetime.now(timezone.utc)
         self._schedule_beacon(station_settings, now)
         self._schedule_status(station_settings, now)
+
+    def _note_pending_beacon(self) -> None:
+        # Once per wait, not on every tick (15 s): a stalled queue filled the event log with it (2026-10-28).
+        if not self._pending_beacon_noted:
+            self._pending_beacon_noted = True
+            log_event("INFO", "outbound", "Beacon scheduler skipped enqueue because a beacon job is already pending")
 
     def _schedule_beacon(self, station_settings: dict[str, object], now: datetime) -> None:
         interval_mode = normalize_beacon_interval_mode(
@@ -72,8 +87,9 @@ class BeaconSchedulerService:
         if interval_minutes <= 0:
             return
         if pending_beacon_job_count() > 0:
-            log_event("INFO", "outbound", "Beacon scheduler skipped enqueue because a beacon job is already pending")
+            self._note_pending_beacon()
             return
+        self._pending_beacon_noted = False
         if not _is_schedule_due(LAST_SCHEDULED_BEACON_AT_KEY, interval_minutes, now):
             return
         log_event("INFO", "outbound", f"Beacon scheduler due check passed at {now.replace(microsecond=0).isoformat()}")
@@ -86,8 +102,9 @@ class BeaconSchedulerService:
 
     def _schedule_proportional_beacon(self, station_settings: dict[str, object], now: datetime) -> None:
         if pending_beacon_job_count() > 0:
-            log_event("INFO", "outbound", "Beacon scheduler skipped enqueue because a beacon job is already pending")
+            self._note_pending_beacon()
             return
+        self._pending_beacon_noted = False
         if not _is_schedule_due(LAST_SCHEDULED_BEACON_AT_KEY, PROPORTIONAL_BEACON_INTERVAL_MINUTES, now):
             return
 

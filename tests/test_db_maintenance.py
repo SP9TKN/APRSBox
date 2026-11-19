@@ -93,6 +93,35 @@ class DatabaseMaintenanceTests(unittest.TestCase):
 
             self.assertEqual([row["message"] for row in rows], ["message-5", "message-4"])
 
+    def test_prune_event_logs_keeps_warnings_and_errors_for_thirty_days(self) -> None:
+        # The station's INFO lines filled the 5000 rows in under a day and took the warnings with them.
+        with temporary_database():
+            connection = connect()
+            try:
+                connection.executemany(
+                    "INSERT INTO event_logs(level, category, message, created_at) VALUES (?, 'test', ?, ?)",
+                    [
+                        ("WARNING", "warning-40-days", "2000-01-01T00:00:00+00:00"),
+                        ("ERROR", "error-40-days", "2000-01-02T00:00:00+00:00"),
+                    ],
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            log_event("WARNING", "test", "warning-today")
+            log_event("ERROR", "test", "error-today")
+            for index in range(6):
+                log_event("INFO", "test", f"message-{index}")
+
+            prune_event_logs(keep_rows=2)
+
+            connection = connect()
+            try:
+                rows = connection.execute("SELECT message FROM event_logs ORDER BY id").fetchall()
+            finally:
+                connection.close()
+            self.assertEqual([row["message"] for row in rows], ["warning-today", "error-today", "message-4", "message-5"])
+
     def test_vacuum_database_runs_on_initialized_database(self) -> None:
         with temporary_database() as database_path:
             for index in range(3):

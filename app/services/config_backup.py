@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from contextlib import closing
 from datetime import datetime, timezone
 from typing import Any
 
@@ -92,7 +93,7 @@ def build_configuration_backup_filename() -> str:
 
 
 def export_configuration_backup() -> dict[str, Any]:
-    with connect() as connection:
+    with closing(connect()) as connection:
         connection.execute("BEGIN")
         tables_payload = {
             table: _export_table_rows(connection, table)
@@ -394,7 +395,7 @@ def _format_foreign_key_violation_error(violations: list[sqlite3.Row]) -> str:
 
 
 def _station_identity_slug() -> str:
-    with connect() as connection:
+    with closing(connect()) as connection:
         row = connection.execute(
             """
             SELECT callsign, ssid

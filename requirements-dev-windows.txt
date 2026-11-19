@@ -1,0 +1,10 @@
+# Desktop + the upstream web stack and test tools (full test suite on Windows).
+-r requirements-desktop.txt
+fastapi==0.118.0
+jinja2==3.1.6
+itsdangerous==2.2.0
+python-multipart==0.0.20
+uvicorn==0.37.0
+httpx==0.28.1
+pytest==9.1.1
+pyflakes==4.0.2

@@ -36,6 +36,7 @@ class SerialTncLowLevelTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must be one of"):
             serial_tnc.normalize_serial_baud_rate("12345")
 
+    @unittest.skipIf(serial_tnc.IS_WINDOWS, "POSIX termios backend")
     def test_close_serial_device_default_does_not_drop_modem_lines(self) -> None:
         with patch.object(serial_tnc.os, "close") as close_mock:
             with patch.object(serial_tnc, "_best_effort_set_modem_lines") as modem_lines_mock:
@@ -43,6 +44,7 @@ class SerialTncLowLevelTests(unittest.TestCase):
         modem_lines_mock.assert_not_called()
         close_mock.assert_called_once_with(123)
 
+    @unittest.skipIf(serial_tnc.IS_WINDOWS, "POSIX termios backend")
     def test_close_serial_device_with_drop_control_lines_drops_dtr_rts(self) -> None:
         with patch.object(serial_tnc.os, "close") as close_mock:
             with patch.object(serial_tnc, "_best_effort_set_modem_lines") as modem_lines_mock:
@@ -50,10 +52,12 @@ class SerialTncLowLevelTests(unittest.TestCase):
         modem_lines_mock.assert_called_once_with(123, dtr=False, rts=False)
         close_mock.assert_called_once_with(123)
 
+    @unittest.skipIf(serial_tnc.IS_WINDOWS, "POSIX termios backend")
     def test_read_serial_chunk_returns_empty_bytes_when_select_interrupted(self) -> None:
         with patch.object(serial_tnc.select, "select", side_effect=InterruptedError):
             self.assertEqual(serial_tnc.read_serial_chunk(7, timeout=0.1), b"")
 
+    @unittest.skipIf(serial_tnc.IS_WINDOWS, "POSIX termios backend")
     def test_write_serial_data_uses_deadline_for_whole_operation(self) -> None:
         monotonic_values = iter([0.0, 0.0, 0.6, 1.1])
         with patch.object(serial_tnc.time, "monotonic", side_effect=lambda: next(monotonic_values)):
@@ -68,6 +72,7 @@ class SerialTncLowLevelTests(unittest.TestCase):
         self.assertAlmostEqual(timeouts[0], 1.0)
         self.assertLess(timeouts[1], timeouts[0])
 
+    @unittest.skipIf(serial_tnc.IS_WINDOWS, "POSIX termios backend")
     def test_write_serial_data_retries_after_interrupted_select(self) -> None:
         monotonic_values = iter([10.0, 10.0, 10.1])
         with patch.object(serial_tnc.time, "monotonic", side_effect=lambda: next(monotonic_values)):
@@ -77,6 +82,7 @@ class SerialTncLowLevelTests(unittest.TestCase):
         self.assertEqual(select_mock.call_count, 2)
         write_mock.assert_called_once_with(23, b"abc")
 
+    @unittest.skipIf(serial_tnc.IS_WINDOWS, "POSIX termios backend")
     def test_open_serial_device_adds_cloexec_when_available_and_disables_crtscts(self) -> None:
         attributes = self._termios_attributes()
         captured: dict[str, list[object]] = {}
@@ -123,6 +129,7 @@ class SerialTncLowLevelTests(unittest.TestCase):
         if hasattr(serial_tnc.termios, "CRTSCTS"):
             self.assertFalse(cflag & int(serial_tnc.termios.CRTSCTS))
 
+    @unittest.skipIf(serial_tnc.IS_WINDOWS, "POSIX termios backend")
     def test_open_serial_device_works_without_cloexec_flag(self) -> None:
         fake_os = _FakeOsNoCloexec()
         with patch.object(serial_tnc, "os", fake_os):

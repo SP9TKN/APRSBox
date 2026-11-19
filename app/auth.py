@@ -79,6 +79,22 @@ def update_user(user_id: int, *, role: str, is_active: bool, password: str | Non
         )
 
 
+def rename_user(user_id: int, username: str) -> None:
+    username = username.strip()
+    if not username:
+        raise ValueError("Username is required.")
+    user = fetch_one("SELECT username FROM users WHERE id = ?", (user_id,))
+    if not user:
+        raise ValueError("User not found.")
+    if user["username"] == username:
+        return
+    existing = get_user_by_username(username)
+    if existing is not None and int(existing["id"]) != user_id:
+        raise ValueError("A user with this username already exists.")
+    execute("UPDATE users SET username = ?, updated_at = ? WHERE id = ?", (username, utc_now(), user_id))
+    log_event("INFO", "auth", f"Renamed user {user['username']} to {username}")
+
+
 def list_users() -> list[dict[str, Any]]:
     rows = fetch_all(
         """

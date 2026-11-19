@@ -1,8 +1,6 @@
 import asyncio
 import contextlib
 import os
-import pty
-import select
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,6 +13,7 @@ from app.services.outbound import build_beacon_tnc2, build_tnc2_kiss_frame, clai
 from app.services.outbound_runtime import OutboundService
 from app.services.serial_tnc import write_serial_data as base_write_serial_data
 from app.services.traffic import TrafficMonitorService, _TrafficModemRuntime
+from serial_pair import master_write, pseudo_serial_device, read_master_chunk
 
 
 @contextlib.contextmanager
@@ -31,17 +30,6 @@ def temporary_database() -> Path:
                 os.environ.pop("APRSBOX_DB_PATH", None)
             else:
                 os.environ["APRSBOX_DB_PATH"] = previous
-
-
-@contextlib.contextmanager
-def pseudo_serial_device() -> tuple[int, str]:
-    master_fd, slave_fd = pty.openpty()
-    slave_path = os.ttyname(slave_fd)
-    try:
-        yield master_fd, slave_path
-    finally:
-        os.close(master_fd)
-        os.close(slave_fd)
 
 
 def insert_serial_modem(
@@ -76,13 +64,6 @@ async def wait_until(predicate, *, timeout: float = 2.0) -> None:
             return
         await asyncio.sleep(0.05)
     raise AssertionError("Condition was not met before timeout.")
-
-
-def read_master_chunk(master_fd: int, *, timeout: float = 1.0) -> bytes:
-    readable, _, _ = select.select([master_fd], [], [], timeout)
-    if not readable:
-        return b""
-    return os.read(master_fd, 1024)
 
 
 class SerialTncValidationTests(unittest.TestCase):
@@ -295,7 +276,7 @@ class SerialTncRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     await service.start()
                     await wait_until(lambda: service.snapshot()["status"] == "connected", timeout=3.0)
 
-                    os.write(master_fd, build_tnc2_kiss_frame("SQ9MDD-4>APRS:>Serial runtime test"))
+                    master_write(master_fd, build_tnc2_kiss_frame("SQ9MDD-4>APRS:>Serial runtime test"))
                     await wait_until(
                         lambda: (fetch_one("SELECT COUNT(*) AS total FROM traffic_frames WHERE format = 'TNC2'") or {"total": 0})["total"] >= 1,
                         timeout=2.0,
@@ -419,7 +400,7 @@ class SerialTncRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(await asyncio.to_thread(read_master_chunk, master_fd, timeout=1.0), expected_frame)
 
                     rx_frame = build_tnc2_kiss_frame("SQ9MDD-4>APRS:>RX after shared serial TX")
-                    os.write(master_fd, rx_frame)
+                    master_write(master_fd, rx_frame)
                     await wait_until(
                         lambda: (
                             fetch_one(
@@ -707,7 +688,7 @@ class SerialTncRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
                     await wait_until(lambda: traffic_monitor.snapshot()["status"] == "connected", timeout=3.0)
 
-                    os.write(master_fd, build_tnc2_kiss_frame("SQ9MDD-4>APRS:>RX after TX failure"))
+                    master_write(master_fd, build_tnc2_kiss_frame("SQ9MDD-4>APRS:>RX after TX failure"))
                     await wait_until(
                         lambda: (
                             fetch_one(

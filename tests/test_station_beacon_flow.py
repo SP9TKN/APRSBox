@@ -13,7 +13,13 @@ from app.services.beacon_scheduler import (
     LAST_SCHEDULED_STATUS_AT_KEY,
 )
 from app.services.content import get_station_settings, safe_update_station_settings, update_station_settings
-from app.services.outbound import build_beacon_tnc2, build_status_tnc2, claim_next_outbound_job, get_outbound_job
+from app.services.outbound import (
+    build_beacon_tnc2,
+    build_status_tnc2,
+    claim_next_outbound_job,
+    enqueue_beacon_job,
+    get_outbound_job,
+)
 from app.services.outbound_runtime import OutboundService
 from app.services.tx_scope import ALL_ACTIVE_INTERFACE_OPTION_VALUE, INTERNAL_TX_INTERFACE_OPTION_VALUE, TX_SCOPE_ALL_ACTIVE
 
@@ -832,6 +838,100 @@ class StationBeaconRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 """
             )
             self.assertIsNotNone(log_row)
+
+    async def test_outbound_worker_survives_a_database_error_and_sends_the_next_beacon(self) -> None:
+        # The user's station, 2026-10-27: one database error ended the worker; no beacon for 40 h.
+        import asyncio
+        import sqlite3
+
+        from app.services import outbound_runtime
+
+        with temporary_database():
+            interface_id = insert_modem(device_path="127.0.0.1:9020")
+            update_station_settings(station_payload(interface_id, tx_enabled="1"))
+            BeaconSchedulerService()._tick()
+
+            real_claim = outbound_runtime.claim_next_outbound_job
+            calls = {"claim": 0}
+
+            def claim_failing_once():
+                calls["claim"] += 1
+                if calls["claim"] == 1:
+                    raise sqlite3.OperationalError("cannot commit transaction - SQL statements in progress")
+                return real_claim()
+
+            processed: list[dict] = []
+            outbound_service = OutboundService(poll_interval=0.01)
+
+            async def record_job(job: dict) -> None:
+                processed.append(job)
+
+            async def no_wait(_delay: float) -> None:
+                await asyncio.sleep(0)
+
+            outbound_service._process_job = record_job  # type: ignore[method-assign]
+            outbound_service._sleep = no_wait  # type: ignore[method-assign]
+            with patch("app.services.outbound_runtime.claim_next_outbound_job", side_effect=claim_failing_once):
+                await outbound_service.start()
+                for _ in range(200):
+                    if processed:
+                        break
+                    await asyncio.sleep(0.01)
+                await outbound_service.stop()
+
+            self.assertEqual([job["kind"] for job in processed], ["beacon"])
+            log_row = fetch_one(
+                "SELECT message FROM event_logs WHERE category = 'outbound' AND message LIKE 'Outbound worker loop failed%'"
+            )
+            assert log_row is not None
+            self.assertIn("SQL statements in progress", log_row["message"])
+
+    async def test_beacon_scheduler_notes_a_pending_beacon_once_per_wait(self) -> None:
+        # Every 15 s tick wrote it while the queue stood still: about 6600 event log lines (2026-10-28).
+        with temporary_database():
+            interface_id = insert_modem(device_path="127.0.0.1:9021")
+            update_station_settings(station_payload(interface_id, tx_enabled="1"))
+            scheduler = BeaconSchedulerService()
+            for _ in range(5):
+                scheduler._tick()  # the first one queues the beacon, the rest find it pending
+
+            def noted() -> int:
+                row = fetch_one("SELECT COUNT(*) AS total FROM event_logs WHERE message LIKE 'Beacon scheduler skipped enqueue%'")
+                return int(row["total"]) if row else 0
+
+            self.assertEqual(noted(), 1)
+            job = claim_next_outbound_job()
+            assert job is not None
+            execute("UPDATE outbound_jobs SET status = 'sent' WHERE id = ?", (int(job["id"]),))
+            scheduler._tick()  # nothing pending: the next wait is noted again
+            enqueue_beacon_job(get_station_settings(), trigger="manual")
+            scheduler._tick()
+            scheduler._tick()
+            self.assertEqual(noted(), 2)
+
+    async def test_beacon_scheduler_survives_a_failed_tick(self) -> None:
+        import asyncio
+
+        with temporary_database():
+            scheduler = BeaconSchedulerService(poll_interval=0.01)
+            ticks = {"count": 0}
+
+            def tick_failing_once() -> None:
+                ticks["count"] += 1
+                if ticks["count"] == 1:
+                    raise RuntimeError("database is locked")
+
+            scheduler._tick = tick_failing_once  # type: ignore[method-assign]
+            await scheduler.start()
+            for _ in range(200):
+                if ticks["count"] >= 3:
+                    break
+                await asyncio.sleep(0.01)
+            await scheduler.stop()
+
+            self.assertGreaterEqual(ticks["count"], 3)  # it went on after the failure
+            log_row = fetch_one("SELECT message FROM event_logs WHERE message LIKE 'Beacon scheduler tick failed%'")
+            assert log_row is not None
 
 
 if __name__ == "__main__":

@@ -24,6 +24,7 @@ from app.db import (
     log_event,
     normalize_event_log_level,
     set_app_setting,
+    traffic_retention_cutoff,
     utc_now,
 )
 from app.i18n import get_app_language, get_translator
@@ -2923,42 +2924,82 @@ def get_recent_station_packets(
 
     packets: list[dict[str, Any]] = []
     for row in rows:
-        parsed = parse_tnc2_frame(str(row["line"] or ""))
-        if parsed is None:
+        packet = _station_packet(row, station_key)
+        if packet is None:
             continue
-        aprs_data = dict(parsed.get("aprs_data") or {})
-        packet_group = str(aprs_data.get("packet_group") or "").strip().lower()
-        if not _aprs_data_has_station_snapshot_fields(aprs_data) and packet_group != "status":
-            continue
-        row_station_key = str(aprs_data.get("entity_name") or parsed.get("logical_source_key") or parsed.get("source_key") or "").strip()
-        if row_station_key.casefold() != station_key.casefold():
-            continue
-
-        heard_date, heard_relative = _format_last_heard_parts(row["created_at"])
-        decoded_summary = aprs_data.get("comment", "")
-        if not decoded_summary and aprs_data.get("data"):
-            decoded_items = _format_decoded_data_for_display(aprs_data["data"], "metric")
-            decoded_summary = ", ".join(item["value"] for item in decoded_items[:4])
-
-        packets.append(
-            {
-                "timestamp": row["created_at"],
-                "timestamp_label": heard_date,
-                "timestamp_relative": heard_relative,
-                "source": str(parsed.get("logical_source_key") or parsed.get("source_key") or ""),
-                "destination": str(parsed.get("logical_destination") or parsed.get("destination") or ""),
-                "path": str(parsed.get("logical_path") or parsed.get("path") or ""),
-                "decoded_summary": decoded_summary,
-                "raw_packet": row["line"],
-            }
-        )
-        if bool(parsed.get("is_third_party")):
-            packets[-1]["third_party"] = True
-            packets[-1]["outer_source"] = str(parsed.get("source_key") or "")
-            packets[-1]["outer_path"] = str(parsed.get("path") or "")
+        packets.append(packet)
         if len(packets) >= limit:
             break
     return packets
+
+
+def get_station_packets_in_retention(
+    callsign: str,
+    *,
+    snapshot: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Every stored frame of the station, newest first, back to the traffic retention cutoff (desktop).
+
+    get_recent_station_packets (the web card) shows 10 frames found among the newest 500 frames of
+    all traffic - about 20 minutes on a busy iGate.  The user wants the whole retention window here.
+    """
+    snapshot = snapshot or _find_station_snapshot(callsign.strip())
+    if snapshot is None:
+        return []
+
+    station_key = str(snapshot["display_callsign"] or "").strip()
+    if not station_key:
+        return []
+    pattern = "%" + station_key.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+    rows = fetch_all(
+        r"""
+        SELECT source, line, created_at
+        FROM traffic_frames
+        WHERE format IN ('TNC2', 'TNC2-TX')
+          AND created_at >= ?
+          AND line LIKE ? ESCAPE '\'
+        ORDER BY created_at DESC, id DESC
+        """,
+        (traffic_retention_cutoff(), pattern),
+    )
+    # LIKE only narrows the rows down (any frame naming the station); the parse decides, as above.
+    return [packet for row in rows if (packet := _station_packet(row, station_key)) is not None]
+
+
+def _station_packet(row: Any, station_key: str) -> dict[str, Any] | None:
+    """The station card's row for a stored frame, or None when the frame is not this station's."""
+    parsed = parse_tnc2_frame(str(row["line"] or ""))
+    if parsed is None:
+        return None
+    aprs_data = dict(parsed.get("aprs_data") or {})
+    packet_group = str(aprs_data.get("packet_group") or "").strip().lower()
+    if not _aprs_data_has_station_snapshot_fields(aprs_data) and packet_group != "status":
+        return None
+    row_station_key = str(aprs_data.get("entity_name") or parsed.get("logical_source_key") or parsed.get("source_key") or "").strip()
+    if row_station_key.casefold() != station_key.casefold():
+        return None
+
+    heard_date, heard_relative = _format_last_heard_parts(row["created_at"])
+    decoded_summary = aprs_data.get("comment", "")
+    if not decoded_summary and aprs_data.get("data"):
+        decoded_items = _format_decoded_data_for_display(aprs_data["data"], "metric")
+        decoded_summary = ", ".join(item["value"] for item in decoded_items[:4])
+
+    packet = {
+        "timestamp": row["created_at"],
+        "timestamp_label": heard_date,
+        "timestamp_relative": heard_relative,
+        "source": str(parsed.get("logical_source_key") or parsed.get("source_key") or ""),
+        "destination": str(parsed.get("logical_destination") or parsed.get("destination") or ""),
+        "path": str(parsed.get("logical_path") or parsed.get("path") or ""),
+        "decoded_summary": decoded_summary,
+        "raw_packet": row["line"],
+    }
+    if bool(parsed.get("is_third_party")):
+        packet["third_party"] = True
+        packet["outer_source"] = str(parsed.get("source_key") or "")
+        packet["outer_path"] = str(parsed.get("path") or "")
+    return packet
 
 
 def get_related_ssids(
@@ -4650,11 +4691,23 @@ def _parse_weather_fields(text: str) -> dict[str, float | int] | None:
     humidity = _match_group(text, r"h(\d{2})")
     pressure = _match_group(text, r"b(\d{5})")
     radiation = _match_group(text, r"[Xx](\d{3})")
+    luminosity = _match_group(text, r"L(\d{3})")
+    luminosity_over_1000 = _match_group(text, r"l(\d{3})")
 
     if wind_dir:
         metrics["wind_dir"] = int(wind_dir)
     if wind_speed:
         metrics["wind_speed_mph"] = int(wind_speed)
+    if not wind_dir and not wind_speed:
+        # A position report with the weather symbol carries the wind as its course/speed: _ddd/sss.
+        wind = re.match(r"\s*(\d{3})/(\d{3})", text)
+        if wind:
+            metrics["wind_dir"] = int(wind.group(1))
+            metrics["wind_speed_mph"] = int(wind.group(2))
+    if luminosity:
+        metrics["luminosity_wm2"] = int(luminosity)
+    elif luminosity_over_1000:
+        metrics["luminosity_wm2"] = int(luminosity_over_1000) + 1000
     if wind_gust:
         metrics["wind_gust_mph"] = int(wind_gust)
     if temperature:
@@ -4937,6 +4990,10 @@ def _format_decoded_data_for_display(metrics: dict[str, float | int | str], unit
     pressure_hpa = metrics.get("pressure_hpa")
     if pressure_hpa is not None:
         items.append(_weather_item("gauge.svg", "Ciśnienie", f"{float(pressure_hpa):.1f} hPa"))
+
+    luminosity_wm2 = metrics.get("luminosity_wm2")
+    if luminosity_wm2 is not None:
+        items.append(_weather_item("white-balance-sunny.svg", "Nasłonecznienie", f"{int(luminosity_wm2)} W/m²"))
 
     radiation_nsv_h = metrics.get("radiation_nsv_h")
     if radiation_nsv_h is not None:

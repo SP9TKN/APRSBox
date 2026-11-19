@@ -302,6 +302,20 @@ def process_normalized_tnc2_rx(
                 finally:
                     connection.execute("RELEASE map_station_projection")
 
+            # Weather reports also go to the 7-day weather history (station charts); a failure there
+            # never stops the frame.
+            from app.services.weather_history import record_weather_observation
+
+            with rx_side_effect_stage(stage_collector, "weather_history"):
+                connection.execute("SAVEPOINT weather_history")
+                try:
+                    record_weather_observation(connection, parsed=parsed_frame, observed_at=occurred_at,
+                                               source_kind=normalized_kind)
+                except Exception:
+                    connection.execute("ROLLBACK TO weather_history")
+                finally:
+                    connection.execute("RELEASE weather_history")
+
             if collect_statistics:
                 with rx_side_effect_stage(stage_collector, "statistics"):
                     connection.execute("SAVEPOINT statistics_projection")

@@ -1,164 +1,206 @@
-# APRSBox
+# APRSBox for Windows — SP9TKN port
 
-APRSBox is a lightweight APRS operations application for Raspberry Pi and Linux systems with a native deployment model. The repository contains two FastAPI applications:
+> 🇵🇱 Polish version: [README.pl.md](README.pl.md)
 
-- `app.main`: the web GUI
-- `app.core_main`: the APRS runtime process responsible for traffic monitoring, outbound queue processing, and periodic schedulers
+<!-- ecosystem-link:aprs -->
+📡 Part of the **SP9TKN APRS station** — see [how the pieces work together](#part-of-the-sp9tkn-aprs-station).
 
-The project is no longer "GUI only". It already includes a working SQLite-backed configuration model, authenticated GUI, APRS runtime services, Packet Routing flows, APRS-IS uplink runtime, and native installation scripts for OpenRC and systemd hosts.
+> [!NOTE]
+> **This is a fork of [APRSBox](https://github.com/SQ9MDD/APRSBox) by SQ9MDD.**
+> **The original is a Linux application** — for Raspberry Pi and Linux servers, with a **web panel** in the browser
+> (FastAPI), Docker images and systemd / OpenRC installers. Its README is kept as
+> **[README.aprsbox.md](README.aprsbox.md)**.
+> **This fork is a native Windows desktop program:** the same APRS service code, but a normal Windows window
+> (PySide6 / Qt) instead of the web panel, a portable package with Python inside, and **additional changes** — a
+> native map with RF paths, an offline tile cache and extra base maps, CWOP weather stations, weather history charts,
+> Windows serial ports, tray and autostart, and a series of reliability fixes.
 
-<img width="1702" height="1147" alt="APRSBox" src="https://github.com/user-attachments/assets/cfa35f80-3db4-4601-af37-ad8fb9f1f4ce" />
+> [!IMPORTANT]
+> **🇵🇱 The program is in Polish** (the window texts are translated to Polish). Detailed usage notes in Polish:
+> [README-WINDOWS.md](README-WINDOWS.md).
 
+<p align="center">
+  <img src="docs/images/aprsbox-windows-map.jpg" width="100%" alt="APRSBox for Windows: native map with stations, RF paths, range circle, distance tool and the last-packet panel">
+</p>
+<p align="center"><sub>The native map: stations with APRS symbols, RF paths ("who heard whom through which digipeater"), range
+circle, Maidenhead grid, distance tool and the list of the last frames. Rendered off-screen from simulated traffic with
+fictitious callsigns (<code>scripts/desktop_screenshots.py</code>).</sub></p>
 
-## Run Docker Container
+## Linux original vs Windows port
 
-If you want to install APRSBox container just use this command:
+| | APRSBox (SQ9MDD) | APRSBox for Windows (this fork) |
+|---|---|---|
+| System | Linux, Raspberry Pi, Docker | **Windows 10 / 11, 64-bit** |
+| User interface | web panel in a browser, login | **native window** (PySide6 / Qt) with all the pages and sub-pages, tray icon, autostart |
+| Installation | install script / Docker image | **portable ZIP** with Python 3.13 inside, or a venv from source |
+| APRS logic | `app.core_main` runtime + `app.main` web app | the same services, running inside the window's process |
+| Serial KISS TNC | POSIX `termios` / `select` | a pyserial backend: `COM3`, `\\.\COM12`, `socket://host:port`, `loop://` |
 
-```bash
-docker run -d \
-  --name aprsbox \
-  --restart unless-stopped \
-  -p 8000:8000 \
-  -v aprsbox_data:/opt/aprsbox/data \
-  -v aprsbox_logs:/opt/aprsbox/logs \
-  sq9mddpl/aprsbox:1.8.25.dev
-```
-Open the web interface: http://127.0.0.1:8000
+**Added or changed in this fork:**
 
-Docker installation detected. In-app system actions are disabled. Update APRSBox by pulling a newer Docker image and recreating the container with the same volumes. Restart or stop APRSBox using Docker commands.
+- **Native map** — map sources from the settings, disk cache of tiles (areas already seen work offline, size limit
+  1 GB), base map switcher on the toolbar, base map brightening (+10…+50 %), "super zoom" past the source's maximum,
+  an elevation map (AWS terrain), seamless tiles.
+- **RF paths on the map** — like APRSIS32: for every heard frame the line goes source → digipeaters (WIDE1, WIDE2 …)
+  → your station; frames from APRS-IS are drawn to the IGate that heard them (qAR/qAO); time window and RF / APRS-IS
+  filters next to the button.
+- **Station details on the map** — information after a click, the station card after a double click, time of
+  reception over RF and over APRS-IS, all frames from the retention period.
+- **CWOP weather stations** on the map — a read-only client of `cwop.aprs.net` with a range filter around your station
+  (APRS-IS never carries them).
+- **Weather history** — every weather report heard over RF, APRS-IS or CWOP kept for 7 days in metric units, with
+  charts on the station card.
+- **Windows integration** — the taskbar / tray icon is your own APRS symbol, start minimised, autostart without admin
+  rights, a sound for EMERGENCY / alert pop-ups, slower refreshes when nobody uses the PC.
+- **Digipeater** — frames with Polish letters and emoji are digipeated.
+- **Reliability** — the background loops (transmit queue, beacon, object, bulletin, WX schedulers) survive a database
+  error instead of stopping silently; a Qt crash (signals through deleted objects, garbage collection on worker threads)
+  removed; memory leaks in background tasks and the map fixed; warnings and errors kept in the event log for 30 days.
+- **Tests** — window tests run without a display (`QT_QPA_PLATFORM=offscreen`) on a temporary database with simulated
+  traffic; an end-to-end test runs the real runtime against a fake KISS TNC and a fake APRS-IS server on localhost.
 
-Example update flow:
+Every change is described, newest first, in [CHANGES-WINDOWS.pl.txt](CHANGES-WINDOWS.pl.txt) (Polish).
 
-```bash
-docker pull sq9mddpl/aprsbox:<new-tag>
-docker stop aprsbox
-docker rm aprsbox
-docker run -d \
-  --name aprsbox \
-  --restart unless-stopped \
-  -p 8000:8000 \
-  -v aprsbox_data:/opt/aprsbox/data \
-  -v aprsbox_logs:/opt/aprsbox/logs \
-  sq9mddpl/aprsbox:<new-tag>
-```
+## Screenshots
 
+<table>
+  <tr>
+    <td><img src="docs/images/aprsbox-windows-dashboard.png" alt="Dashboard"><br><sub>Dashboard: station status, activity charts, station readiness</sub></td>
+    <td><img src="docs/images/aprsbox-windows-traffic.png" alt="Traffic monitor"><br><sub>Traffic monitor: RF and APRS-IS frames, filters</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/images/aprsbox-windows-stations.png" alt="Stations"><br><sub>Stations: type, last activity, APRS icon, position, distance</sub></td>
+    <td><img src="docs/images/aprsbox-windows-statistics.png" alt="Statistics"><br><sub>Statistics</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/images/aprsbox-windows-wx.png" alt="WX"><br><sub>WX: own weather beacon configuration and data sources</sub></td>
+    <td><img src="docs/images/aprsbox-windows-band_condition.png" alt="Band condition"><br><sub>Band condition</sub></td>
+  </tr>
+</table>
+<p align="center"><sub>Rendered off-screen from simulated traffic with fictitious callsigns; host network details on the dashboard are
+blurred.</sub></p>
 
-## Fast Install
+<p align="center">
+  <img src="docs/images/aprsbox-at-the-station.jpg" width="100%" alt="APRSBox at the SP9TKN station with real traffic">
+</p>
+<p align="center"><sub>At the real station: APRSBox with the map and the list of heard stations, next to Audio PTT and Direwolf.</sub></p>
 
-If you want to install APRSBox on a target Linux machine, the fastest path is a single installer command.
+## Installation
 
-- run one command
-- the script installs packages, creates the Python environment, initializes the database, installs services, and starts the app
+**Portable package (simplest):** download `APRSBox-windows_….zip` from
+[Releases](https://github.com/SP9TKN/APRSBox/releases), open its **Properties** and tick **Unblock**, unpack it to a
+folder you can write to (Desktop, Documents, `C:\APRS\` — not `C:\Program Files`) and run **`APRSBox.exe`**. Python 3.13
+and all libraries are inside; nothing is installed. The station data stays in the program folder (`data\`, `logs\`,
+`config\`, `backups\`); the package contains none.
 
-**Installer-supported targets**
+**From source** (Python 3.13 for Windows):
 
-- Alpine Linux
-- Debian, Raspberry Pi OS / Raspbian, and Debian-like systems exposing `ID_LIKE=debian`
-
-**Alpine Linux** (run as root):
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/SQ9MDD/APRSBox/main/scripts/install.sh | \
-  env APRSBOX_GIT_URL=https://github.com/SQ9MDD/APRSBox.git APRSBOX_GIT_BRANCH=main sh
-```
-
-The Alpine installer uses BusyBox user-management tools and Alpine's preferred `doas`, so it does not require the `shadow` or `sudo` packages.
-
-**Raspberry Pi OS / Debian / Debian-like** (use `sudo`):
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/SQ9MDD/APRSBox/main/scripts/install.sh | \
-  sudo env APRSBOX_GIT_URL=https://github.com/SQ9MDD/APRSBox.git APRSBOX_GIT_BRANCH=main sh
-```
-
-**After installation**
-
-- web GUI: `http://<host>:8000/login`
-- default login: `admin`
-- default password: `aprs`
-
-## APRS Runtime Scope
-
-Current APRS runtime behavior:
-
-- RX:
-  - connects to enabled TCP or serial KISS TNC interfaces
-  - reads KISS frames
-  - decodes AX.25 UI frames to TNC2 when possible
-  - stores frames in SQLite
-  - updates heard-station views, band condition processing, and APRS message ingestion
-- TX:
-  - queues outbound jobs in SQLite
-  - processes jobs from the core worker
-  - supports `beacon`, `status`, `object`, APRS messages (`direct`, `query`, `ack`), bulletins / announcements, WX, and DIGI TX jobs
-  - builds TNC2 lines and wraps them into KISS frames
-  - sends them via active monitor connection (with direct transport fallback)
-- Packet Routing (DIGI Flows):
-  - source is currently `receiver_rf`
-  - supports filters (`dupe`, `path`, `strict`, `direct_only`, `digi`, `callsign`, `packet_type`, `icon`, `distance`)
-  - supports targets `tx_rf`, `tx_aprsis`, `action_log`, `action_drop`
-- APRS-IS uplink:
-  - managed automatically from enabled Packet Routing flows with `tx_aprsis` target
-  - includes strict guard for blocked path tokens and malformed third-party frames
-  - provides runtime diagnostics and counters in GUI
-- Scheduling:
-  - station beacon scheduler
-  - station APRS Status scheduler
-  - object scheduler with jitter spacing between object transmissions
-  - bulletin / announcement scheduler with jitter spacing between message transmissions
-  - WX scheduler
-
-Important current limitation:
-
-- Runtime transport supports `TCP` modem definitions with `host:port` and `SERIALL` modem definitions with `device_path` plus `baud_rate`.
-- Packet Routing source runtime is currently limited to `receiver_rf`.
-
----
-
-# APRSBox PL
-
-APRSBox to lekka aplikacja APRS dla Raspberry Pi i systemów Linux z natywnym modelem instalacji. Repozytorium zawiera dwie aplikacje FastAPI:
-
-- `app.main`: web GUI
-- `app.core_main`: proces runtime odpowiedzialny za monitoring ruchu, kolejkę outbound i schedulery okresowe
-
-Projekt nie jest już wyłącznie szkieletem GUI. W repo są działające elementy runtime APRS: RX/TX KISS, kolejka outbound w SQLite, Packet Routing (DIGI Flows), uplink APRS-IS, wiadomości APRS oraz schedulery beacon/status/object/bulletin/WX.
-
-## Szybka instalacja
-
-Najprostszy przekaz dla mniej zaawansowanego użytkownika jest taki:
-
-- uruchamiasz jedno polecenie
-- skrypt robi resztę sam
-
-To znaczy:
-
-- instaluje wymagane pakiety systemowe
-- tworzy virtualenv Pythona
-- kopiuje aplikację do `/opt/aprsbox/app`
-- inicjalizuje bazę SQLite
-- zakłada konto admin
-- instaluje serwisy `aprsbox-web` i `aprsbox-core`
-- uruchamia aplikację i sprawdza health check
-
-Alpine Linux:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/SQ9MDD/APRSBox/main/scripts/install.sh | \
-  env APRSBOX_GIT_URL=https://github.com/SQ9MDD/APRSBox.git APRSBOX_GIT_BRANCH=main sh
+```bat
+py -3.13 -m venv .venv
+.venv\Scripts\python -m pip install -r requirements-desktop.txt
+.venv\Scripts\pythonw.exe APRSBox.pyw
 ```
 
-Instalator dla Alpine używa narzędzi BusyBox do zarządzania użytkownikami oraz zalecanego w Alpine `doas`, dlatego nie wymaga pakietów `shadow` ani `sudo`.
+`APRSBox.exe` is only a small launcher (`launcher\APRSBox.cs`, built with `launcher\build.cmd`) that starts
+`APRSBox.pyw` with `.venv` or the bundled `python\` without a console window. Options: `--minimized`, `--no-runtime`
+(window only, no interfaces and no transmitting), `--page NAME` (e.g. `map`, `traffic`, `messages`).
 
-Raspberry Pi OS / Debian:
+**First start:** *My station* (callsign, SSID, position, symbol, path, beacon interval; transmit is off by default) →
+*Interfaces*: KISS TCP (e.g. Direwolf `127.0.0.1:8100`), KISS over a serial port (`COM5`), APRS-IS (the passcode is
+computed from the callsign), OpenWebRX MQTT (receive only) → only then enable TX and the routing rules (digipeater).
+Details: [README-WINDOWS.md](README-WINDOWS.md).
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/SQ9MDD/APRSBox/main/scripts/install.sh | \
-  sudo env APRSBOX_GIT_URL=https://github.com/SQ9MDD/APRSBox.git APRSBOX_GIT_BRANCH=main sh
+## Station scripts (`windows-station/`)
+
+The scripts that keep the SP9TKN station running unattended:
+
+| Script | What it does |
+|---|---|
+| `start-aprsbox` / `stop-aprsbox` | starts the station in order (Direwolf → Audio PTT → APRSBox) and places the windows / stops it and pauses the watchdog |
+| `start-watchdog` / `stop-watchdog` | the scheduled task "APRSBox-Watchdog": every 30 s it starts whatever stopped, every 5 s it puts the windows back where `layout.json` says (after a monitor sleep, a KVM switch, a resolution change) |
+| `edit-layout` / `save-layout` / `fix-layout` | arrange the windows by hand (the watchdog waits up to 15 min) and save the layout / restore it now |
+
+They expect the station layout next to APRSBox: [Direwolf](https://github.com/SP9TKN/direwolf) in
+`direwolf-1.8.1-aprsbox290r2\…\direwolf.exe` and [Audio PTT](https://github.com/SP9TKN/audio-ptt) in
+`Audio PTT\AudioPTT.exe`. The programs are started through WMI, so stopping the scheduled task never takes the station
+down with it.
+
+## Tests
+
+```bat
+.venv\Scripts\python -m pip install -r requirements-dev-windows.txt
+.venv\Scripts\python -m pytest
 ```
 
-Po instalacji:
+Page screenshots without a display:
+`.venv\Scripts\python scripts\desktop_screenshots.py C:\Temp\shots dashboard map traffic --tiles --paths`.
 
-- panel WWW: `http://<host>:8000/login`
-- domyślny login: `admin`
-- domyślne hasło: `aprs`
+<!-- ecosystem:aprs:start -->
+
+## Part of the SP9TKN APRS station
+
+Five projects work together as one APRS station on a Windows PC with a Yaesu FT-290R II (2 m). Each part does one job and also works on its own.
+
+| Project | Role |
+|---|---|
+| [ESP32 PTT trigger](https://github.com/SP9TKN/esp32-ptt-pc818) | keys the radio's PTT through a PC818 optocoupler (galvanic isolation), red/green TX/RX LEDs |
+| [Audio PTT](https://github.com/SP9TKN/audio-ptt) | radio audio as a UZ7HO-style waterfall + PTT lamps, read-only |
+| [APRSBox for Windows](https://github.com/SP9TKN/APRSBox) **← you are here** | the APRS application: iGate, digipeater, beacons, messages, map (Windows port of SQ9MDD's APRSBox) |
+| [CYD-Monitor](https://github.com/SP9TKN/cyd-monitor) | 2.8" ESP32 display as a wireless monitor: the station screen over Wi-Fi, with touch |
+| [Direwolf — SP9TKN package](https://github.com/SP9TKN/direwolf) | sound-card modem / TNC (AFSK 1200): WB2OSZ's Direwolf 1.8.1 with a dark console window and the station configuration (PTT on DTR, KISS TCP for APRSBox) |
+
+![The station at work: Audio PTT (top left), Direwolf (bottom left) and APRSBox with the map. Coordinates of other stations in the Direwolf window are blurred.](docs/images/aprs-station-desktop.jpg)
+*The station at work: Audio PTT (top left), Direwolf (bottom left) and APRSBox with the map. Coordinates of other stations in the Direwolf window are blurred.*
+
+```mermaid
+flowchart LR
+    RIG["Yaesu FT-290R II<br/>2 m transceiver"]
+    SC["USB sound card"]
+    PTT["ESP32 PTT trigger<br/>PC818 optocoupler"]
+    NET(("APRS-IS"))
+    CYD["CYD-Monitor panel<br/>2.8 in, Wi-Fi, touch"]
+    subgraph PC["Windows PC"]
+        DW["Direwolf<br/>AFSK 1200 modem"]
+        AB["APRSBox for Windows"]
+        AP["Audio PTT"]
+        SRV["CYD-Monitor server"]
+    end
+    RIG <-->|"audio"| SC
+    SC <--> DW
+    DW <-->|"KISS TCP"| AB
+    AB <--> NET
+    DW -->|"DTR"| PTT
+    PTT -->|"PTT, isolated"| RIG
+    SC -.->|"same audio"| AP
+    DW -.->|"DTR state, read-only"| AP
+    AB -.->|"screen"| SRV
+    AP -.->|"screen"| SRV
+    SRV -->|"Wi-Fi"| CYD
+```
+
+**How it works**
+
+1. **Receive.** Audio from the FT-290R II goes through a USB sound card to **Direwolf**, which decodes the AFSK 1200
+   packets and hands them to **APRSBox** over KISS TCP. APRSBox stores them, draws them on the map, gates them to
+   APRS-IS and digipeats them according to its routing rules.
+2. **Transmit.** APRSBox queues a beacon, a message or a frame to digipeat and passes it to Direwolf over KISS.
+   Direwolf raises **DTR** on the USB serial port of the **ESP32 PTT trigger** (`PTT COMx DTR`); the board closes the
+   radio's PTT through the PC818 optocoupler and lights the red LED, and Direwolf plays the packet audio.
+3. **Watch.** **Audio PTT** shows the same radio audio as a waterfall, with two lamps that follow the PTT line. It
+   reads the DTR state from the port Direwolf holds, without opening the port, so it never gets in the way of
+   transmitting.
+4. **From any room.** **CYD-Monitor** mirrors the station desktop (APRSBox map, Audio PTT, Direwolf log) to a 2.8"
+   ESP32 "Cheap Yellow Display" over Wi-Fi. The same panel is also the display of the
+   [SP9TKN SDR scanner](https://github.com/SP9TKN/cyd-monitor#part-of-the-sp9tkn-sdr-scanner): it jumps to the scanner page when SDR Oxide hears something.
+5. **Unattended.** Watchdog scripts (in the APRSBox repository) restart any program that stops and put the windows
+   back in place after the monitor sleeps; a virtual display keeps the desktop at 1920×1080 while the physical
+   monitor is off.
+
+<!-- ecosystem:aprs:end -->
+
+## License
+
+[GPL-3.0](LICENSE), the same as the original. APRSBox © SQ9MDD; the Windows port © 2026 SP9TKN.
+
+**Tools:** the Windows port was developed with [Claude Code](https://claude.com/claude-code) (Anthropic) — AI assistant
+used for coding, testing and documentation.

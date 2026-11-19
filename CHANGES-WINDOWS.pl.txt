@@ -1,0 +1,552 @@
+APRSBox dla Windows – dziennik zmian
+====================================
+
+Zmiany od wersji przekazanej SQ9MDD 10.10.2026 (paczka AprsBOX.zip z 10.10.2026, 08:00,
+SHA-256 4AC40141D9D0CE2CC30887DA4F4BD4616362CF33C71A7C25E79ECD26DDCC0154).
+Wcześniejsze zmiany względem oryginału opisuje Lista-zmian.pdf.
+
+Najnowsze wpisy są na górze.
+
+
+2026-10-30 – Testy nie zmieniają już autostartu Windows
+-------------------------------------------------------
+
+Co było nie tak:
+  - Test klikający wszystkie przyciski zaznaczał też w Ustawieniach pole „Uruchamiaj APRSBox
+    z Windows” i zapisywał je w prawdziwym rejestrze (HKCU\...\Run), ze ścieżką do Pythona,
+    który akurat uruchomił testy. U SP9TKN został po tym wpis wskazujący tymczasową, już
+    usuniętą kopię programu. Sam program i jego praca nie były tym dotknięte.
+
+Co jest teraz:
+  - Podczas testów autostart jest atrapą w pamięci, więc testy nie dotykają rejestru.
+    Program działa bez zmian: pole w Ustawieniach nadal zapisuje prawdziwy autostart.
+
+Zmienione pliki:
+  tests/conftest.py                autostart w testach trzymany w pamięci
+  tests/test_desktop_autostart.py  nowy plik testów: testy nie zmieniają rejestru
+
+
+2026-10-28 – Dziennik zdarzeń: ostrzeżenia i błędy trzymane 30 dni
+-------------------------------------------------------------------
+
+Co było nie tak:
+  - Dziennik zdarzeń trzyma najnowsze 5000 wpisów (czyszczony po północy). U SP9TKN to
+    starczało na mniej niż dobę: digipeater zapisywał linię „Enqueued DIGI Flow frame” przy
+    każdej odebranej ramce (ok. 6500 na dobę), a przy zatrzymanej kolejce nadawania planer
+    beaconów co 15 s dopisywał „Beacon scheduler skipped enqueue…” (ok. 6600 linii).
+  - Ostrzeżenia i błędy (np. ślad błędu bazy, przez który stanęła kolejka) znikały razem
+    z tym szumem, zanim ktokolwiek zdążył do nich zajrzeć.
+
+Co jest teraz:
+  - Limit 5000 wpisów dotyczy tylko zwykłych wpisów (INFO/DEBUG). Ostrzeżenia i błędy
+    zostają 30 dni, niezależnie od ich liczby. Opis zasad w Ustawienia → baza danych
+    mówi o tym.
+  - „Enqueued DIGI Flow frame” ma poziom DEBUG (domyślnie niezapisywany) także dla ramek
+    z radia – te ramki są i tak w logach ruchu.
+  - „Beacon scheduler skipped enqueue…” jest zapisywany raz na każde oczekiwanie,
+    nie co 15 s.
+
+Zmienione pliki:
+  app/db.py                             prune_event_logs: limit dla INFO/DEBUG, WARNING/ERROR 30 dni
+  app/services/digi_flow_runtime.py     wpis o każdej ramce na poziomie DEBUG
+  app/services/beacon_scheduler.py      „already pending” raz na oczekiwanie
+  app/desktop/pages/settings.py         opis zasad czyszczenia
+  app/desktop/languages/pl.json         tłumaczenie nowego opisu
+  tests/test_db_maintenance.py          test: ostrzeżenia zostają 30 dni, starsze znikają
+  tests/test_station_beacon_flow.py     test: „already pending” raz na oczekiwanie
+
+
+2026-10-28 – Beacony przestały wychodzić (kolejka nadawania stanęła)
+--------------------------------------------------------------------
+
+Co było nie tak:
+  - Od 27.10 ok. 02:30 APRSBox nie wysłał ani jednego beacona (także „wyślij teraz”), choć
+    odbiór, iGate i digipeater działały dalej.
+  - Przyczyna: zadania do nadania (beacony, obiekty, wiadomości, opóźnione digi) wysyła
+    jedna pętla w tle. Jeden błąd bazy danych (np. chwilowo zajęta – w logu widać takie błędy
+    także w innym miejscu: „cannot commit transaction – SQL statements in progress”) kończył
+    tę pętlę na zawsze, bez żadnego komunikatu. Zadania zbierały się w kolejce, a planer
+    beaconów nie dodawał nowych, bo jeden beacon wciąż „czekał”.
+  - Tę samą słabość miały planery: beaconów, obiektów, biuletynów, WX, własnych alarmów,
+    konserwacji bazy i statystyk.
+
+Co jest teraz:
+  - Błąd w jednym obiegu pętli jest zapisywany w dzienniku zdarzeń („... failed ... Retrying.”,
+    przy kolejce nadawania z pełnym śladem błędu), a pętla po chwili działa dalej.
+  - Przy wdrożeniu zaległe zadania z kolejki (stare beacony z 27–28.10, w tym ręczne próby)
+    oznaczono jako nienadane. Inaczej po restarcie poszłoby kilka beaconów jeden po drugim.
+
+Zmienione pliki:
+  app/services/outbound_runtime.py        pętla kolejki nadawania przeżywa błąd (log + ponowienie)
+  app/services/beacon_scheduler.py        to samo dla planera beaconów
+  app/services/object_scheduler.py        ... obiektów
+  app/services/bulletin_scheduler.py      ... biuletynów
+  app/services/wx_scheduler.py            ... WX
+  app/services/own_alert_scheduler.py     ... własnych alarmów
+  app/services/maintenance_scheduler.py   ... konserwacji bazy
+  app/services/radio_activity.py          ... statystyk aktywności
+  tests/test_station_beacon_flow.py       testy: kolejka po błędzie bazy wysyła następny beacon,
+                                          planer beaconów działa dalej po nieudanym obiegu
+
+
+2026-10-23 – Usunięta przyczyna awarii programu (Qt6Core.dll)
+-------------------------------------------------------------
+
+Co było nie tak:
+  - APRSBox zamknął się nagle dwa razy (17.10 o 01:17 i 23.10 o 08:51), za każdym razem z błędem
+    dostępu do pamięci w Qt6Core.dll (watchdog go podnosił).
+  - Analiza miejsca awarii w Qt6Core.dll: Qt wysyłał sygnał (wewnętrzna funkcja doActivate)
+    i czytał dane obiektu, który już nie istniał.
+  - Takie obiekty mogły powstawać w dwóch miejscach:
+    1. Każde zadanie w tle (kilka tysięcy na godzinę) miało własny mały obiekt Qt, którym wynik
+       wracał do okna. Okno odbierało wynik i usuwało ten obiekt, a wątek roboczy mógł jeszcze
+       kończyć wysyłanie sygnału przez ten obiekt. Qt na to nie pozwala. Zdarza się to rzadko,
+       częściej na zajętym komputerze.
+    2. Automatyczne sprzątanie pamięci Pythona (garbage collector) uruchamiało się w dowolnym
+       wątku, także roboczym, i mogło tam niszczyć obiekty okna, które wolno niszczyć tylko
+       w wątku okna.
+
+Co jest teraz:
+  - Wyniki wszystkich zadań w tle wracają przez jeden stały obiekt, tworzony raz i nigdy
+    nieusuwany. Nie ma już obiektu na każde zadanie (przy okazji mniej pracy i pamięci).
+  - Sprzątanie pamięci Pythona działa tylko w wątku okna: raz na sekundę, z tymi samymi progami
+    co automatyczne. Przy zamykaniu programu wraca zwykłe, automatyczne.
+  - Zapis awarii (logs\crash.log, wpis niżej) zostaje. Gdyby awaria jednak się powtórzyła,
+    pokaże, co robił w tej chwili każdy wątek.
+  - Przy okazji znaleziony i poprawiony błąd: po przebudowie stron (np. zapis ustawień) usunięta
+    mapa zostawała podpięta pod wspólny menedżer kafelków. Przy następnej zmianie stanu kafelków
+    (serwer kafelków niedostępny / znów działa) program pokazywał okno „Wystąpił nieoczekiwany
+    błąd”. Teraz połączenie znika razem z mapą.
+
+Zmienione pliki:
+  app/desktop/tasks.py             jeden stały _Dispatcher zamiast obiektu _Relay na każde zadanie
+  app/desktop/app.py               GuiThreadGarbageCollector: sprzątanie pamięci Pythona w wątku okna
+  app/desktop/widgets/map_view.py  stan kafelków: połączenie sygnał–sygnał (znika z usuniętą mapą)
+  tests/test_desktop_widgets.py    test: usunięta mapa nie wywołuje błędu przy zmianie stanu kafelków
+  tests/test_desktop_memtrace.py   testy: zadania nie zostawiają obiektów, błędy i zamknięta strona,
+                                   sprzątanie pamięci tylko w wątku okna
+
+
+2026-10-23 – Naprawiony wyciek pamięci w zadaniach w tle
+--------------------------------------------------------
+
+Co było nie tak:
+  - APRSBox stale przybierał na pamięci (ok. 2–3 MB na godzinę, także po zmniejszeniu buforów mapy).
+  - Diagnostyka (memtrace, niżej) wskazała miejsce: każde zadanie w tle (odświeżenie mapy, ścieżek,
+    stron – kilka tysięcy na godzinę) tworzyło nową funkcję z dekoratorem @Slot i podpinało ją do
+    sygnału. PySide zostawiał po każdej takiej funkcji zapis w Pythonie i w pamięci Qt.
+    W pomiarze: 20 000 zadań = +10,5 MB pamięci procesu.
+
+Co jest teraz:
+  - Wynik zadania wraca przez slot zdefiniowany raz w klasie. 20 000 zadań = ok. +2 MB jednorazowo,
+    dalej pamięć nie rośnie z liczbą zadań (test to pilnuje).
+  - Nowa diagnostyka pamięci, domyślnie wyłączona: działa, gdy istnieje plik data\memtrace.flag.
+    Co godzinę zapisuje do logs\memtrace.log, które miejsca w kodzie i jakie obiekty zajmują coraz
+    więcej pamięci.
+
+  - Zapis awarii: przy błędzie wewnątrz Qt/Pythona (APRSBox wyłożył się tak 17.10 i 23.10, za każdym
+    razem w Qt6Core.dll; watchdog go podnosił) program zapisuje do logs\crash.log, co robił w tej
+    chwili każdy wątek. Pozwoli to znaleźć przyczynę przy następnej awarii.
+
+Zmienione pliki:
+  app/desktop/tasks.py             _Relay ze slotem _deliver w klasie zamiast funkcji @Slot na każde zadanie
+  app/desktop/memtrace.py          nowy: diagnostyka pamięci (plik-flaga)
+  app/desktop/app.py               włączenie diagnostyki (flaga) i zapisu awarii (faulthandler → logs\crash.log)
+  tests/test_desktop_memtrace.py   nowy plik testów (diagnostyka, brak wycieku w zadaniach w tle)
+
+
+2026-10-22 – Mniejsze zużycie pamięci przez mapę
+------------------------------------------------
+
+Co było nie tak:
+  - Po 5 dniach pracy APRSBox zajmował 587 MB RAM. Przyczyna to dwa bufory z bardzo
+    wysokimi limitami: do 768 kafelków mapy w pamięci (ok. 190 MB) i do 4000 obrazków
+    etykiet znaków (ok. 120 MB; po przekroczeniu limitu czyszczone w całości).
+
+Co jest teraz:
+  - Kafelki w pamięci: tylko tyle, ile pokazuje mapa – do 96 (ok. 24 MB; pełny ekran mapy
+    to ok. 54 kafelki). Resztę program szybko doczytuje z dysku.
+  - Etykiety: do 800, a po przekroczeniu usuwane są najdawniej używane (ok. 24 MB).
+  - Mapa niewidoczna przez 30 s (inna strona, okno zminimalizowane albo w zasobniku)
+    oddaje swoje etykiety, a gdy żadnej mapy nie widać – także kafelki. Po powrocie wczytują
+    się z dysku.
+  - Nowa opcja w Ustawienia → Aplikacja desktopowa: „Szybka mapa: kafelki mapy w pamięci RAM”.
+    Wyłączona (domyślnie) – lekka aplikacja, jak wyżej. Włączona – do 512 kafelków w pamięci
+    (ok. 130 MB więcej) i nic nie jest zwalniane, więc powrót do oglądanych miejsc i zoom są
+    natychmiastowe. Zmiana działa od razu, bez restartu.
+  - Wygląd mapy i etykiet bez zmian.
+
+Zmienione pliki:
+  app/desktop/pages/settings.py     przełącznik „Szybka mapa”
+  app/desktop/languages/pl.json     teksty przełącznika
+  app/desktop/tiles.py              MEMORY_TILES = 96, tryb szybki 512 (set_fast_map)
+  app/desktop/widgets/map_view.py   LABEL_CACHE_MAX = 800 (LRU), zwalnianie pamięci niewidocznej mapy
+  tests/test_desktop_widgets.py     testy test_memory_caches_stay_small, test_maps_off_the_screen_give_their_memory_back
+
+
+2026-10-22 – Digipeater: ramki z polskimi literami i emoji są powtarzane
+-------------------------------------------------------------------------
+
+Co było nie tak:
+  - Digi odrzucał ramki, których treść nie była czystym ASCII, z błędem „AX.25 APRS information
+    must use 7-bit ASCII”. Przykład: wiadomości jednej ze stacji z emoji 😉 (21.10, 6 ramek).
+    Zwykłe digipeatery przepuszczają takie ramki bez zmian.
+
+Co jest teraz:
+  - Digi powtarza ramkę z tekstem UTF-8 (polskie litery, emoji) bajt w bajt tak, jak ją odebrał.
+  - Ramki z bajtami, których nie da się odczytać jako UTF-8, nadal nie są powtarzane – nie da
+    się ich odtworzyć wiernie.
+  - Własne nadawanie (beacon, wiadomości, obiekty, bramka APRS-IS → RF) bez zmian: tylko ASCII.
+
+Zmienione pliki:
+  app/services/outbound.py           build_tnc2_kiss_frame(..., allow_utf8=True) tylko dla digi
+  app/services/rf_tx_dispatcher.py   kolejka digi nadaje ramki „tak jak usłyszane”
+  tests/test_desktop_digi_utf8.py    nowy plik testów
+
+
+2026-10-16 – Mapa: okno stacji pokazuje czas odbioru przez radio i przez APRS-IS
+--------------------------------------------------------------------------------
+
+Co było nie tak:
+  - Stacja słyszana ostatnio tylko przez APRS-IS zostaje na mapie (Historia obiektów liczy
+    każdy odbiór), ale okno informacji pokazywało jeden czas: ostatni odbiór przez własne radio.
+    Przykład: stacja na mapie z „5 h temu”, choć z APRS-IS przyszedł 58 minut wcześniej.
+
+Co jest teraz:
+  - Okno informacji o stacji (klik) pokazuje osobno:
+      Radio:   2026.10.15 14:11 UTC (4 h 44 min temu)
+      APRS-IS: 2026.10.15 17:57 UTC (58 min temu)
+    tylko te wiersze, które stacja ma. Zastępują dawne „Ostatnio słyszana” i „Wiek”.
+  - Wiek od 1 do 24 h jest podawany w godzinach i minutach.
+  - Stacja bez żadnego z tych czasów (np. obiekt) ma okno jak dotąd.
+
+Zmienione pliki:
+  app/desktop/map_layers.py           heard_time_rows(); station_tooltip() używa obu czasów
+  app/desktop/languages/pl.json       „Radio”, „{h} h {m} min temu”
+  tests/test_desktop_widgets.py       test test_station_info_shows_when_the_radio_and_aprs_is_last_had_it
+
+
+2026-10-13 – Karta stacji: wszystkie ramki z okresu retencji
+------------------------------------------------------------
+
+Co było nie tak:
+  - Lista „Ostatnie pakiety / ramki” na karcie stacji pokazywała najwyżej 10 ramek i szukała
+    ich tylko wśród 500 najnowszych ramek całego ruchu (wszystkie stacje, wszystkie
+    interfejsy). Tak działa też oryginał w wersji webowej.
+  - Przy ruchu ok. 1470 ramek na godzinę (APRS-IS, 2 m, LoRa, CWOP) 500 ramek to ok. 20 minut.
+    Dla aktywnej stacji 10 wierszy to ostatnie 1–2 minuty, a stacja słyszana pół godziny
+    temu miała pustą listę, mimo że jej ramki wciąż były w bazie.
+
+Co jest teraz:
+  - Karta pokazuje wszystkie ramki stacji, które trzyma baza, czyli z całego okresu
+    „Retencja historii ruchu” (Ustawienia), od najnowszej. Lista się przewija.
+  - Nad tabelą jest podpis, np. „Ramki z ostatnich 6 h (retencja historii ruchu): 619”.
+  - Wybór ramek jak dotąd: tylko ramki, które są danej stacji (nie te, w których stacja jest
+    tylko digipeaterem w ścieżce, ani innych SSID).
+  - Koszt: baza zawęża wyszukiwanie po znaku, odczyt dla aktywnej stacji (ok. 600 ramek)
+    trwa ok. 55 ms, karta odświeża się co 30 s w tle.
+  - Wersja webowa bez zmian (10 ramek).
+
+Zmienione pliki:
+  app/services/content.py            get_station_packets_in_retention(); wspólny _station_packet()
+  app/desktop/pages/station_detail.py  lista z całej retencji + podpis (packets_note)
+  app/desktop/languages/pl.json       tekst podpisu
+  tests/test_desktop_station_packets.py  nowy plik testów (cała retencja, zmiana retencji)
+  tests/test_desktop_gui.py           test test_station_detail_lists_the_frames_of_the_whole_retention
+
+
+2026-10-12 – Mapa: informacje o stacji po kliknięciu, karta stacji po dwukliku
+------------------------------------------------------------------------------
+
+Co było nie tak:
+  - Każdy przejazd myszą przez mapę otwierał dymki stacji, które zasłaniały mapę.
+  - Pojedynczy klik od razu przenosił do karty stacji, więc nie dało się po prostu
+    przeczytać informacji o stacji bez opuszczania mapy.
+
+Co jest teraz (stacje na mapie):
+  - Najechanie myszą: nic się nie dzieje, zmienia się tylko kursor na rączkę.
+    Nie ma już dymka ani obwódki wokół symbolu. Zgrupowane stacje rozkładają się dopiero po
+    kliknięciu, a nie po najechaniu.
+  - Jeden lewy klik: okno z informacjami o stacji (ta sama treść co dawniej w dymku).
+    Okno nie znika przy ruchu myszy. Zamyka je kliknięcie, kółko myszy, wyjechanie myszą
+    poza mapę albo upływ minuty.
+  - Szybki dwuklik: przejście do karty stacji.
+  - Prawy klik: bez zmian, linie ścieżki RF.
+  - Dwuklik na pustej mapie przybliża ją, jak dotąd. Dymki grup stacji, punktów śladu
+    i linii nadal pokazują się po najechaniu, ale nie zasłaniają otwartego okna stacji.
+
+Zmienione pliki:
+  app/desktop/widgets/map_view.py   klik = okno informacji (INFO_WINDOW_MS), dwuklik = sygnał
+                                    marker_double_clicked, najazd bez dymka, obwódki i rozkładania
+  app/desktop/pages/map_page.py     karta stacji otwierana dwuklikiem (_open_station)
+  tests/test_desktop_widgets.py     test test_station_info_on_a_click_and_the_station_page_on_a_double_click
+                                    (zastępuje test_station_tooltip_shows_at_once_and_is_not_restarted)
+  tests/test_desktop_gui.py         _open_station zamiast _on_marker_clicked
+
+
+2026-10-12 – Mapa: dymek stacji od razu i bez migotania
+--------------------------------------------------------
+
+Co było nie tak:
+  - Po najechaniu myszą na stację dymek pojawiał się z opóźnieniem, a czasem migotał.
+  - Windows ma włączoną animację dymków, a Qt ją przejmuje: dymek nie pojawia się od razu,
+    tylko rozwija się. Duży dymek stacji rozwijał się nawet kilkaset ms i w tym czasie nie liczył
+    się jeszcze jako widoczny.
+  - Mapa pokazuje dymek przy każdym ruchu myszy. Przy każdym, nawet najmniejszym ruchu
+    w czasie rozwijania Qt tworzył dymek od nowa i zaczynał animację od początku.
+    W pomiarze (ręka drżąca na myszce przez 1,5 s) dymek powstał 21 razy i ani razu się nie pokazał.
+
+Co jest teraz:
+  - Animacja i zanikanie dymków są w programie wyłączone: dymki pojawiają się od razu (wszystkie,
+    nie tylko na mapie).
+  - Mapa nie pokazuje ponownie dymka, który już jest widoczny z tą samą treścią.
+  - W tym samym pomiarze dymek jest widoczny po 8 ms i zostaje.
+
+Zmienione pliki:
+  app/desktop/app.py                configure_tooltips(): bez animacji i zanikania dymków
+  app/desktop/widgets/map_view.py   _show_tooltip(): dymek pokazywany raz, nie przy każdym ruchu
+  tests/test_desktop_widgets.py     test test_station_tooltip_shows_at_once_and_is_not_restarted
+
+
+2026-10-11 – Mapa: bez linii na styku kafelków
+-----------------------------------------------
+
+Co było nie tak:
+  Na każdej mapie (OSM, CARTO, satelita, OpenTopoMap, Wysokości) widać było cienkie linie tam,
+  gdzie stykają się kafelki. Kafelki były ustawiane z ułamkiem piksela (np. 0,37 px), a krawędź
+  takiego kafelka była wygładzana, więc na styku przeświecało tło okna. W pomiarze piksele na styku
+  były ciemniejsze o 43 poziomy jasności (200 → 157).
+
+Co jest teraz:
+  - Kafelki są ustawiane w całych pikselach, a przy ich rysowaniu wygładzanie krawędzi jest
+    wyłączone. Ślady, linie i symbole nadal są rysowane gładko i w dokładnym położeniu.
+  - Dotyczy wszystkich map i wszystkich powiększeń, także super zoomu. Małe mapy na kartach
+    stacji i alarmów też.
+
+Zmienione pliki:
+  app/desktop/widgets/map_view.py   _paint_tiles(): całe piksele, bez wygładzania krawędzi kafelków
+  tests/test_desktop_widgets.py     test test_no_lines_between_map_tiles
+
+
+2026-10-11 – CWOP: serwer bez filtra zalewał mapę stacjami z całego świata
+--------------------------------------------------------------------------
+
+Co się stało:
+  - Adres cwop.aprs.net to kilka serwerów. Jeden z nich, CWOP-4 (143.244.144.248, aprsc), na porcie
+    14580 odpowiada „# No user-specified filters on this port” i wysyła cały świat, mimo filtra
+    r/…/50 przy logowaniu. Pozostałe (CWOP-3, 5, 6, 7) filtrują poprawnie.
+  - 10.10 o 19:41 UTC, przy ponownym łączeniu, trafiło na CWOP-4. Do rana przyszło ok. 18 000 ramek
+    na godzinę z ponad 10 000 stacji pogodowych (USA, Japonia…). Baza urosła z ok. 17 do 164 MB.
+  - Tysiące ikon WX przykryły mapę. Ślady stacji ruchomych są liczone z ostatnich 8000 ramek,
+    a przy tej powodzi było to tylko ok. 25 minut, prawie samego CWOP, więc ślady APRS znikały.
+    Filtr APRS-IS (m/50) był cały czas w porządku.
+
+Co jest teraz:
+  - Odbiornik CWOP rozpoznaje serwer, który ignoruje filtr (jego komunikat po zalogowaniu),
+    rozłącza się i łączy z innym serwerem z puli. Taki adres jest pomijany przez 6 godzin.
+  - Niezależnie od serwera do programu trafiają tylko ramki CWOP z pozycją w promieniu nasłuchu
+    (+1 km). Ramki spoza promienia są odrzucane jeszcze przed przetworzeniem. Raz na godzinę
+    w logu jest ostrzeżenie z liczbą odrzuconych ramek.
+  - Jednorazowe sprzątanie bazy (po kopii aprsbox-before-cwop-cleanup-20261011-075951.db):
+    usunięte stacje nigdy niesłyszane przez RF, przyniesione wyłącznie przez CWOP i leżące dalej
+    niż 51 km: 10 382 stacje na mapie, 185 287 odczytów pogody, 9 270 wpisów „stacja w internecie”
+    iGate'a, 110 399 ramek. Po VACUUM baza ma 13 MB. Stacje z RF i APRS-IS nie zostały ruszone.
+
+Zmienione pliki:
+  app/services/aprsis.py            otwieranie połączenia w osobnej metodzie _open_connection()
+  app/services/cwop.py              wybór serwera z pominięciem zablokowanych, wykrywanie serwera
+                                    bez filtra, odrzucanie ramek spoza promienia (frame_position, distance_km)
+  tests/test_cwop.py                testy obu zabezpieczeń
+
+
+2026-10-10 – Mapy od razu na liście; pola „Subdomeny” i „Klucz API” w źródłach map
+-----------------------------------------------------------------------------------
+
+Mapy od pierwszego uruchomienia:
+  - Program przy starcie dopisuje do bazy jeden raz te źródła map:
+      OpenTopoMap, Wysokości (AWS), CARTO ciemna, CARTO jasna, Satelita (Esri).
+    Dotyczy to też świeżej bazy z ZIP-a, więc po rozpakowaniu są od razu na liście „Mapa”.
+  - Przychodzą same ustawienia: bez pobranych kafelków i bez żadnego klucza.
+  - CARTO wymaga darmowego klucza (carto.com/basemaps), więc obie mapy CARTO są na starcie
+    wyłączone. Wpisz klucz w Ustawienia → Źródła map → Edytuj → „Klucz API” i zaznacz „Włączone”.
+  - Mapa, której adres już jest w bazie, jest pomijana (nic się nie dubluje). Usunięta mapa
+    nie wraca przy następnym starcie (znacznik desktop.map_presets_version).
+  - Domyślna mapa zostaje OpenStreetMap. Wspólny kod bazy (init_db) jest bez zmian: dopisuje
+    to tylko aplikacja okienkowa.
+
+Formularz źródła mapy:
+  - W Ustawieniach → Źródła map doszły pola „Subdomeny” (np. a,b,c dla {s} w adresie)
+    i „Klucz API” (dla {apiKey}, ukryty podczas wpisywania). Wcześniej okno ich nie miało,
+    więc klucza nie dało się wpisać.
+
+Zmienione pliki:
+  app/desktop/app.py                MAP_PRESETS, ensure_map_presets() (wywoływane przy starcie)
+  app/desktop/pages/settings.py     pola Subdomeny i Klucz API w formularzu źródła mapy
+  app/desktop/languages/pl.json     „Subdomains”, „API key”
+  tests/test_desktop_map_presets.py nowy plik testów
+  tests/test_desktop_gui.py         test ustawień zapisuje też subdomeny i klucz
+
+
+2026-10-10 – Mapa wysokości „Wysokości (AWS)” i limit kopii map w ustawieniach
+-------------------------------------------------------------------------------
+
+Mapa wysokości:
+  - Nowa pozycja na liście „Mapa”: „Wysokości (AWS)”. Kolor oznacza wysokość n.p.m. na stałej
+    skali: od 100 m (ciemna zieleń) przez 300 m (jasna zieleń), 500 m (żółć), 700–1100 m (brązy)
+    do 1550 m i wyżej (biel). Do tego cieniowanie rzeźby terenu.
+  - Dane wysokości: AWS Terrain Tiles (otwarte dane, „terrarium”: wysokość zapisana w kolorze
+    piksela, R*256 + G + B/256 - 32768 m), do zoomu 15, czyli szczegółowość ok. 30 m.
+    Dalej działa super zoom. Cieniowanie: Esri World Hillshade. Oba bez klucza.
+  - APRSBox maluje kafelek sam: kolory z gotowej tabeli (65 536 pozycji, 256 KB, liczona raz,
+    ok. 0,2 s), potem nakłada cieniowanie (Qt, tryb mnożenia) i zapisuje JPEG ok. 20 KB.
+    Na tym komputerze to ok. 16 ms na kafelek, bez dodatkowych bibliotek (bez numpy).
+  - Namalowany kafelek zostaje na stałe, bez odświeżania co 14 dni, bo teren się nie zmienia.
+    Usunąć go może tylko limit kopii map. Gdy nie uda się pobrać cieniowania, kafelek jest
+    pokazany bez niego i namalowany ponownie przy następnym wyświetleniu.
+  - Kafelki są zapisane w osobnym folderze z wersją kolorów w nazwie („-v1”). Gdyby kolory
+    kiedyś się zmieniły, kafelki namalują się od nowa.
+  - Źródło rozpoznawane jest po adresie: każde źródło map z „/terrarium/” w adresie jest
+    malowane jako mapa wysokości. U mnie dodane w Ustawieniach → Źródła map:
+      Wysokości (AWS)  https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png
+                       maks. zoom 15
+
+Limit kopii map:
+  - Ustawienia → Aplikacja desktopowa → „Kopia map na dysku: limit”:
+    512 MB, 1 GB, 2 GB (domyślnie), 3 GB, 5 GB, 10 GB. Obok widać, ile kopia zajmuje teraz.
+  - Mniejszy limit działa od razu po zapisaniu: przycinanie rusza w tle.
+  - Zasada usuwania bez zmian: najpierw kafelki spoza obszaru nasłuchu stacji, potem najstarsze.
+
+Zmienione pliki:
+  app/desktop/tiles.py              mapa wysokości (render_elevation_tile, fetch_elevation_tile_bytes,
+                                    elevation_colour), limit z ustawień (tile_cache_limit_mb,
+                                    set_tile_cache_limit_mb, tile_cache_size_bytes), wspólne _download/_write_cache
+  app/desktop/pages/settings.py     limit i zajętość kopii map w sekcji „Aplikacja desktopowa”
+  app/desktop/languages/pl.json     teksty limitu
+  tests/test_desktop_widgets.py     testy mapy wysokości i limitu
+  tests/test_desktop_gui.py         test test_settings_desktop_map_tile_limit
+
+
+2026-10-10 – Mapa: limit kopii kafelków na dysku (1 GB)
+---------------------------------------------------------
+
+Co było nie tak:
+  Pobrane kafelki map (data\cache\desktop-map-tiles) nie miały limitu rozmiaru. Przy częstym
+  oglądaniu mapy, zwłaszcza satelity i dużych powiększeń, kopia rosłaby bez końca.
+
+Co jest teraz:
+  - Kopia ma limit 1 GB. Rozmiar jest sprawdzany w tle minutę po starcie i potem co 32 MB
+    nowo pobranych kafelków.
+  - Po przekroczeniu limitu program usuwa kafelki, aż kopia spadnie do 90% limitu (900 MB):
+      1. najpierw kafelki leżące w całości poza obszarem nasłuchu stacji, czyli poza kołem wokół
+         „Mojej stacji” o promieniu filtra APRS-IS (ten sam promień co dla CWOP, u mnie 50 km),
+      2. potem najstarsze (według daty pobrania).
+    Kafelki małych powiększeń, które obejmują stację, liczą się jako „w obszarze”.
+  - Każde przycięcie zostawia wpis w logu (kategoria map): ile kafelków usunięto, ile było
+    poza obszarem i ile MB zwolniono.
+  - Puste foldery po usuniętych kafelkach też są usuwane.
+  - Kafelek starszy niż 14 dni jest pobierany ponownie, gdy oglądasz to miejsce, jak dotąd.
+
+Zmienione pliki:
+  app/desktop/tiles.py              prune_tile_cache(), tile_distance_km(), station_listening_area(),
+                                    sprawdzanie w tle (start_tile_cache_check)
+  tests/test_desktop_widgets.py     test test_tile_cache_limit_removes_tiles_outside_the_listening_area_first
+
+Przy okazji dodałem w Ustawieniach → Źródła map źródło „Topograficzna (OpenTopoMap)”:
+  https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png, subdomeny a,b,c, maks. zoom 17
+  (poziomice z wysokościami i cieniowanie rzeźby; bez klucza). To zmiana w bazie, nie w kodzie.
+
+
+2026-10-10 – Mapa: rozjaśnianie podkładu (+10…+50%)
+----------------------------------------------------
+
+Co było nie tak:
+  CARTO ciemna była zbyt ciemna nawet przy 0%. Lista przy podkładzie umiała tylko przyciemniać
+  (0–100%).
+
+Co jest teraz:
+  - Lista idzie od góry: +50%, +40%, +30%, +20%, +10%, 0%, -10% … -100%.
+    „+” rozjaśnia podkład (nakłada biel), „-” przyciemnia go jak dotąd (dawne 10–100%).
+  - Wartość jest zapamiętywana osobno dla każdego podkładu (i motywu), np. OSM -10%,
+    CARTO ciemna +20%. Po zmianie mapy na pasku lista sama ustawia wartość tej mapy.
+    Gdy podkład nie ma jeszcze własnej wartości, używana jest wcześniejsza wspólna.
+  - Małe mapy na kartach stacji i alarmów używają tego samego ustawienia.
+
+Zmienione pliki:
+  app/desktop/widgets/map_view.py   map_mask(), mask_setting_key(), stored_mask_percent()
+  app/desktop/pages/map_page.py     lista +50%…-100%, wartość osobno dla każdej mapy
+  app/desktop/pages/station_detail.py, app/desktop/pages/alert_detail.py   to samo ustawienie na małych mapach
+  app/desktop/languages/pl.json     podpowiedź listy
+  tests/test_desktop_gui.py         test przełącznika map sprawdza też rozjaśnianie
+
+
+2026-10-10 – Mapa: przełącznik podkładu na pasku i super zoom
+--------------------------------------------------------------
+
+Pomysł z mojej strony pogodowej CWOP (pogodacwop.org), która ma przyciski Carto / Mapa / Satelita
+i zoom do 25.
+
+Przełącznik podkładu:
+  - Na wysuwanym pasku mapy, obok przyciemnienia, jest lista „Mapa” z podpisem pod spodem,
+    tak jak listy czasu.
+  - Lista pokazuje włączone źródła map z Ustawień. Gdy jest tylko jedno źródło, lista jest ukryta.
+  - Wybór zapamiętuje okno (config/desktop.ini, klucz map/tile_source_id). Domyślne źródło
+    w Ustawieniach się nie zmienia.
+  - Podkład zmieniają razem wszystkie mapy w programie, także małe mapy na kartach stacji.
+  - Gdy wybrane źródło zostanie wyłączone lub usunięte w Ustawieniach, mapa wraca do domyślnego.
+  - Nowe źródła dodaje się w Ustawieniach → Źródła map, jak dotąd. U mnie doszły:
+      CARTO ciemna   https://{s}.basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}{r}.png?key={apiKey}
+      CARTO jasna    to samo z light_all
+                     (subdomeny a,b,c,d, maks. zoom 20; CARTO wymaga darmowego klucza API, bez niego
+                     kafelki mają napis „API key required”)
+      Satelita (Esri) https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}
+                     (maks. zoom 19)
+
+Super zoom:
+  - Mapę można przybliżyć do poziomu 25, niezależnie od źródła.
+  - Powyżej maks. zoomu źródła (OSM i Esri 19, CARTO 20) mapa powiększa jego ostatnie kafelki.
+    Nic nowego nie jest wtedy pobierane. Podkład robi się rozmyty, ale symbole, podpisy, ślady
+    i linie są rysowane wektorowo i zostają ostre.
+  - Przydaje się, gdy kilka stacji stoi w jednym miejscu (np. SP9TKN i SP9TKN-1), do linijki
+    na krótkich odległościach i do podpisów.
+  - Grupowanie i rozsuwanie nakładających się znaczników oraz kliknięcie w grupę liczą się
+    od maks. zoomu źródła, a nie od 25, więc przy zwykłych powiększeniach działają jak wcześniej.
+
+Zmienione pliki:
+  app/desktop/tiles.py              wybór źródła z paska (set_preferred_source), sygnał source_changed
+  app/desktop/widgets/map_view.py   MAX_ZOOM = 25, native_max_zoom, powiększanie kafelków (_draw_tile)
+  app/desktop/pages/map_page.py     lista „Mapa” na pasku z podpisem, zapamiętanie wyboru
+  app/desktop/languages/pl.json     „Map background” = „Podkład mapy”
+  tests/test_desktop_widgets.py     test test_super_zoom_enlarges_the_last_tiles_of_the_source
+  tests/test_desktop_gui.py         test test_map_bar_switches_the_map_source; test podpisów
+                                    paska zna też podpis „Mapa”
+
+Kod usług (app/services) i schemat bazy są bez zmian. Źródła map to zwykłe wiersze tabeli map_sources.
+
+
+2026-10-10 – Mapa: krótszy dymek stacji, pogoda w 2–3 linijkach
+-----------------------------------------------------------------
+
+Co było nie tak:
+  Dymek po najechaniu na stację (np. stację pogodową z CWOP) rozciągał się przez całą
+  mapę, bo wszystkie zdekodowane dane szły w jednej, niezawijanej linii, np.:
+  „Kierunek wiatru: 220° · Prędkość wiatru: 13 km/h · Porywy: 19 km/h · Temperatura:
+  13.3°C · Deszcz 1h: 0.0 mm · …” (ok. 230 znaków).
+
+Co jest teraz:
+  - Dymek ma mniej więcej szerokość pozostałych wierszy, czyli tyle co inne dymki stacji
+    (od 56 do 72 znaków).
+  - Pogoda jest w 2–3 linijkach, tematycznie:
+        Temperatura: 13.3°C · Wilgotność: 70% · Ciśnienie: 980.8 hPa
+        Wiatr: 220°, 13 km/h, porywy 19 km/h · Nasłonecznienie: 153 W/m²
+        Opad: 1h 0.0 mm, 24h 0.0 mm, od północy 0.0 mm
+    Linia, dla której stacja nie podaje danych, nie pojawia się.
+  - Pozostałe dane (kurs, prędkość, wysokość, PHG, QSY, dane obiektów) są zawijane do
+    tej samej szerokości.
+  - Długi komentarz stacji też jest zawijany, zamiast poszerzać dymek.
+
+Zmienione pliki:
+  app/desktop/map_layers.py         station_tooltip(), nowa funkcja station_data_lines()
+  app/desktop/languages/pl.json     tekst „since midnight” = „od północy”
+  tests/test_desktop_widgets.py     test test_station_tooltip_keeps_weather_on_a_few_short_lines
+
+Kod usług (app/services) i baza danych są bez zmian.

@@ -1280,7 +1280,8 @@ def latest_message_dispatch_at() -> datetime | None:
     return _parse_timestamp(str(row["dispatch_at"]))
 
 
-def build_tnc2_kiss_frame(line: str) -> bytes:
+def build_tnc2_kiss_frame(line: str, *, allow_utf8: bool = False) -> bytes:
+    """``allow_utf8``: a frame repeated as it was heard (digipeater), see _encode_ax25_information."""
     source, destination, path, info = _parse_tnc2_line(line)
     ax25 = bytearray()
     addresses = [_encode_ax25_address(destination, is_last=False), _encode_ax25_address(source, is_last=not bool(path))]
@@ -1300,7 +1301,7 @@ def build_tnc2_kiss_frame(line: str) -> bytes:
         ax25.extend(chunk)
     ax25.append(AX25_CONTROL_UI)
     ax25.append(AX25_PID_NO_LAYER3)
-    ax25.extend(_encode_ax25_information(info))
+    ax25.extend(_encode_ax25_information(info, allow_utf8=allow_utf8))
     escaped = bytearray([0x00])
     for byte in ax25:
         if byte == KISS_FEND:
@@ -1312,10 +1313,17 @@ def build_tnc2_kiss_frame(line: str) -> bytes:
     return bytes([KISS_FEND]) + bytes(escaped) + bytes([KISS_FEND])
 
 
-def _encode_ax25_information(info: str) -> bytes:
+def _encode_ax25_information(info: str, *, allow_utf8: bool = False) -> bytes:
     try:
         return info.encode("ascii")
     except UnicodeEncodeError as exc:
+        # A digipeater repeats what it heard (the user: frames with Polish letters or emoji were not
+        # repeated). Received information is decoded as UTF-8, so valid UTF-8 goes out byte for byte;
+        # bytes that were not UTF-8 came in as U+FFFD and cannot be restored, so those still fail.
+        if allow_utf8 and "�" not in info:
+            encoded = info.encode("utf-8")
+            if len(encoded) <= AX25_MAX_INFORMATION_BYTES:
+                return encoded
         raise ValueError("AX.25 APRS information must use 7-bit ASCII.") from exc
 
 

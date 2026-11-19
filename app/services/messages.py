@@ -55,6 +55,7 @@ MESSAGE_DEFAULT_PATH_SETTING_KEY = "messages.default_path"
 MESSAGE_RECEIVE_ANY_SSID_SETTING_KEY = "messages.receive_any_ssid"
 MESSAGE_TARGET_GROUPS_SETTING_KEY = "messages.target_groups"
 MESSAGE_APRSIS_TARGET_GROUPS_SETTING_KEY = "messages.aprsis_target_groups"
+MESSAGE_MUTED_SENDERS_SETTING_KEY = "messages.muted_senders"
 CONVERSATION_KIND_DIRECT = "direct"
 CONVERSATION_KIND_GROUP = "group"
 DEFAULT_MESSAGE_TARGET_GROUPS = ("ALL", "QST", "CQ")
@@ -167,6 +168,67 @@ def normalize_message_target_groups(value: Any) -> list[str]:
     return groups
 
 
+def normalize_muted_message_senders(value: Any) -> list[str]:
+    """Normalize the muted sender list.
+
+    ``CALL-SSID`` mutes exactly that station; a bare ``CALL`` mutes the
+    callsign with every SSID.
+    """
+    if isinstance(value, list):
+        raw_values = value
+    else:
+        raw_values = str(value or "").replace("\n", ",").replace(" ", ",").split(",")
+    senders: list[str] = []
+    for raw_value in raw_values:
+        sender = _canonical_callsign_identity(str(raw_value or ""))
+        if not sender:
+            continue
+        if not re.fullmatch(r"[A-Z0-9]{1,9}(?:-[A-Z0-9]{1,2})?", sender):
+            raise ValueError(_t("Muted senders must be callsigns, with or without an SSID, separated by commas."))
+        if sender not in senders:
+            senders.append(sender)
+    return senders
+
+
+def get_muted_message_senders() -> list[str]:
+    try:
+        return normalize_muted_message_senders(get_app_setting(MESSAGE_MUTED_SENDERS_SETTING_KEY) or "")
+    except ValueError:
+        return []
+
+
+def message_sender_is_muted(sender: str, muted_senders: list[str] | None = None) -> bool:
+    entries = get_muted_message_senders() if muted_senders is None else muted_senders
+    if not entries:
+        return False
+    identity = _canonical_callsign_identity(sender)
+    if not identity:
+        return False
+    base, _ssid = split_callsign_ssid(identity)
+    for entry in entries:
+        if "-" in entry:
+            if identity == entry:
+                return True
+        elif base == entry:
+            return True
+    return False
+
+
+def set_message_sender_muted(callsign: str, muted: bool) -> list[str]:
+    """Add or remove one sender; unmuting also drops a base-callsign entry covering it."""
+    identity = _canonical_callsign_identity(callsign)
+    if not identity:
+        raise ValueError(_t("Destination callsign is required."))
+    senders = get_muted_message_senders()
+    if muted:
+        if not message_sender_is_muted(identity, senders):
+            senders = normalize_muted_message_senders([*senders, identity])
+    else:
+        senders = [entry for entry in senders if not message_sender_is_muted(identity, [entry])]
+    set_app_setting(MESSAGE_MUTED_SENDERS_SETTING_KEY, ",".join(senders))
+    return senders
+
+
 def get_message_settings() -> dict[str, Any]:
     saved_settings = get_app_settings(
         (
@@ -174,6 +236,7 @@ def get_message_settings() -> dict[str, Any]:
             MESSAGE_TARGET_GROUPS_SETTING_KEY,
             MESSAGE_APRSIS_TARGET_GROUPS_SETTING_KEY,
             MESSAGE_RECEIVE_ANY_SSID_SETTING_KEY,
+            MESSAGE_MUTED_SENDERS_SETTING_KEY,
         )
     )
     raw_saved_path = saved_settings.get(MESSAGE_DEFAULT_PATH_SETTING_KEY)
@@ -204,12 +267,17 @@ def get_message_settings() -> dict[str, Any]:
         except ValueError:
             aprsis_target_groups = []
     receive_any_ssid = str(saved_settings.get(MESSAGE_RECEIVE_ANY_SSID_SETTING_KEY) or "").strip().lower() in {"1", "true", "yes", "on"}
+    try:
+        muted_senders = normalize_muted_message_senders(saved_settings.get(MESSAGE_MUTED_SENDERS_SETTING_KEY) or "")
+    except ValueError:
+        muted_senders = []
     return {
         "default_path": default_path,
         "path_options": [{"value": value, "label": label} for value, label in MESSAGE_PATH_OPTIONS],
         "receive_any_ssid": receive_any_ssid,
         "target_groups": target_groups,
         "aprsis_target_groups": aprsis_target_groups,
+        "muted_senders": muted_senders,
     }
 
 
@@ -272,7 +340,14 @@ def save_message_settings(payload: dict[str, Any]) -> dict[str, Any]:
             else normalize_message_target_groups(saved_aprsis_groups)
         )
     receive_any_ssid = bool(payload.get("receive_any_ssid"))
+    muted_senders = (
+        normalize_muted_message_senders(payload.get("muted_senders") or [])
+        if "muted_senders" in payload
+        else None
+    )
     set_app_setting(MESSAGE_DEFAULT_PATH_SETTING_KEY, path)
+    if muted_senders is not None:
+        set_app_setting(MESSAGE_MUTED_SENDERS_SETTING_KEY, ",".join(muted_senders))
     set_app_setting(MESSAGE_RECEIVE_ANY_SSID_SETTING_KEY, "1" if receive_any_ssid else "0")
     set_app_setting(MESSAGE_TARGET_GROUPS_SETTING_KEY, ",".join(groups))
     set_app_setting(MESSAGE_APRSIS_TARGET_GROUPS_SETTING_KEY, ",".join(aprsis_groups))
@@ -670,6 +745,7 @@ def _get_messages_page_data_scoped() -> dict[str, Any]:
     active_conversation_id: str | None = None
     local_sender = _local_station_identity()
     alarm_groups = set(configured_alarm_groups)
+    muted_senders = message_settings["muted_senders"]
     for row in conversation_rows:
         display_callsign = format_display_callsign(str(row["remote_callsign"]), str(row["remote_ssid"]))
         conversation_kind = str(row["conversation_kind"] or CONVERSATION_KIND_DIRECT)
@@ -683,6 +759,11 @@ def _get_messages_page_data_scoped() -> dict[str, Any]:
             item
             for item in stored_messages
             if str(item.get("addressee") or "").strip().upper() not in alarm_groups
+            and not (
+                muted_senders
+                and item["direction"] == MESSAGE_DIRECTION_RX
+                and message_sender_is_muted(str(item.get("sender") or ""), muted_senders)
+            )
         ]
         if stored_messages and not messages:
             continue
@@ -740,12 +821,12 @@ def get_unread_inbox_count() -> int:
     try:
         rows = fetch_all(
             """
-            SELECT c.remote_callsign, c.remote_ssid, m.addressee,
+            SELECT c.remote_callsign, c.remote_ssid, m.addressee, m.sender,
                    COUNT(m.id) AS unread_count
             FROM aprs_message_conversations c
             JOIN aprs_messages m ON m.conversation_id = c.id
             WHERE m.direction = ? AND m.is_unread = 1
-            GROUP BY c.id, c.remote_callsign, c.remote_ssid, m.addressee
+            GROUP BY c.id, c.remote_callsign, c.remote_ssid, m.addressee, m.sender
             """,
             (MESSAGE_DIRECTION_RX,),
         )
@@ -754,6 +835,7 @@ def get_unread_inbox_count() -> int:
         return 0
     local_sender = _local_station_identity()
     alarm_groups = set(get_aprs_alarm_groups())
+    muted_senders = get_muted_message_senders()
     unread_total = 0
     for row in rows:
         display_callsign = format_display_callsign(str(row["remote_callsign"]), str(row["remote_ssid"]))
@@ -762,6 +844,8 @@ def get_unread_inbox_count() -> int:
         if display_callsign.strip().upper() in alarm_groups:
             continue
         if str(row["addressee"] or "").strip().upper() in alarm_groups:
+            continue
+        if muted_senders and message_sender_is_muted(str(row["sender"] or ""), muted_senders):
             continue
         unread_total += int(row["unread_count"] or 0)
     return unread_total
@@ -1550,14 +1634,21 @@ def store_incoming_message(
 ) -> None:
     if is_configured_aprs_alarm_group(addressee):
         return
+    # A muted sender's messages are dropped (no conversation, unread mark or
+    # notification), but a direct message still gets its ACK below so the
+    # sender stops retrying.
+    muted = message_sender_is_muted(sender)
+    if muted and not acknowledge:
+        return
     station_settings = _get_station_settings()
     ack_path = _resolve_auto_ack_path(sender=sender, station_settings=station_settings)
-    conversation = create_or_update_conversation(
+    conversation = None if muted else create_or_update_conversation(
         conversation_callsign or sender,
         conversation_kind=conversation_kind,
     )
     duplicate_unnumbered = (
-        not message_number
+        not muted
+        and not message_number
         and _has_recent_unnumbered_incoming_message_duplicate(
             sender=sender,
             addressee=addressee,
@@ -1566,7 +1657,7 @@ def store_incoming_message(
         )
     )
     existing = None
-    if message_number:
+    if message_number and not muted:
         existing = fetch_one(
             """
             SELECT id
@@ -1579,7 +1670,10 @@ def store_incoming_message(
             """,
             (MESSAGE_DIRECTION_RX, sender, message_number),
         )
-    if existing is None and not duplicate_unnumbered:
+    if muted:
+        log_event("INFO", "messages", f"Dropped incoming APRS message from muted sender {sender} to {addressee}")
+    elif existing is None and not duplicate_unnumbered:
+        assert conversation is not None
         with get_connection() as connection:
             cursor = connection.execute(
                 """
@@ -1700,6 +1794,8 @@ def store_incoming_bulletin(
     path: str,
     timestamp: str,
 ) -> None:
+    if message_sender_is_muted(sender):
+        return
     conversation = create_or_update_conversation(sender, conversation_kind=CONVERSATION_KIND_DIRECT)
     display_text = _format_bulletin_display_text(addressee, message_text)
     existing = fetch_one(
@@ -2334,5 +2430,6 @@ def _log_invalid_message_frame(*, reason: str, source: str, line: str) -> None:
         f"Ignored APRS message frame ({normalized_reason}); "
         f"source='{normalized_source}'; frame='{snippet}'"
     )
+    # Once, under "messages": every message frame from APRS-IS with a non-AX.25 sender (e.g. SSID "-FM")
+    # used to fill the log twice.
     log_event("WARNING", "messages", message)
-    log_event("WARNING", "system", message)

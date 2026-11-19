@@ -117,6 +117,26 @@ POSITION_LINE = "SP5ABC-9>APRS,TCPIP*:!5223.45N/02101.23E>APRS-IS test"
 
 
 class AprsisInterfaceConfigurationTests(unittest.TestCase):
+    def test_uplink_supervisor_reads_its_settings_through_one_connection(self) -> None:
+        from app import db
+
+        with temporary_database():
+            set_app_setting("aprsis_login", "SQ9XYZ-10")
+            create_aprsis_interface()
+            opened: list[int] = []
+            original = db.connect
+
+            def counting() -> object:
+                opened.append(threading.get_ident())
+                return original()
+
+            with patch.object(db, "connect", counting):
+                rx_interface, config = AprsisClientService._read_desired_state()
+            self.assertEqual(opened, [threading.get_ident()])  # once a second, for all of it
+            self.assertEqual(rx_interface, get_enabled_aprsis_interface())
+            self.assertEqual(config, get_aprsis_config())
+            self.assertEqual(config["login"], "SQ9XYZ-10")
+
     def test_new_aprsis_interface_uses_default_filter_and_existing_connection_settings(self) -> None:
         with temporary_database():
             set_app_setting("aprsis_server", "example.aprs2.net")
@@ -528,6 +548,46 @@ class AprsisReceivePipelineTests(unittest.TestCase):
             self.assertEqual(len(rf_points), 2)
             self.assertNotEqual(rf_points[0]["latitude"], rf_points[1]["latitude"])
 
+    def test_track_scan_parses_only_frames_it_has_not_seen(self) -> None:
+        from app.services import map_service
+
+        with temporary_database():
+            rf_interface_id = create_rf_interface()
+            start = datetime.now(timezone.utc) - timedelta(minutes=1)
+
+            def heard(offset: int, line: str) -> None:
+                self.assertTrue(
+                    process_normalized_tnc2_rx(
+                        line,
+                        source="Main RF",
+                        source_kind="rf",
+                        source_interface_id=rf_interface_id,
+                        band="2m",
+                        timestamp=(start + timedelta(seconds=offset)).isoformat(),
+                    )
+                )
+
+            heard(0, "SP5TRK>APRS:!5223.00N/02101.00E>Point A")
+            heard(1, "SP5TRK>APRS:!5224.00N/02102.00E>Point B")
+            parsed: list[str] = []
+            original = map_service.parse_tnc2_frame
+
+            def counting(line: str):
+                parsed.append(line)
+                return original(line)
+
+            with patch.object(map_service, "parse_tnc2_frame", counting):
+                first = _build_mobile_track_points_by_station_keys({"sp5trk": "SP5TRK"})
+                parsed_before = len(parsed)
+                self.assertEqual(_build_mobile_track_points_by_station_keys({"sp5trk": "SP5TRK"}), first)
+                self.assertEqual(len(parsed), parsed_before)  # the same frames: nothing parsed again
+                heard(2, "SP5TRK>APRS:!5225.00N/02103.00E>Point C")
+                later = _build_mobile_track_points_by_station_keys({"sp5trk": "SP5TRK"})
+            self.assertEqual(len(parsed) - parsed_before, 1)
+            self.assertIn("Point C", parsed[-1])
+            self.assertEqual(later["SP5TRK"][:2], first["SP5TRK"])
+            self.assertAlmostEqual(later["SP5TRK"][2]["latitude"], 52 + 25 / 60, places=5)
+
 
 class AprsisAsyncSideEffectTests(unittest.IsolatedAsyncioTestCase):
     @staticmethod
@@ -725,6 +785,7 @@ class AprsisAsyncSideEffectTests(unittest.IsolatedAsyncioTestCase):
                         "traffic_db_insert",
                         "alerts",
                         "map_state",
+                        "weather_history",
                         "post_projection_logs",
                         "igate_bookkeeping",
                         "traffic_latency_log",

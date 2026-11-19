@@ -94,7 +94,7 @@ class ObjectAndItemFormTests(unittest.TestCase):
         ]
         self.assertEqual(SECTION_DEFINITIONS["items"].list_title, "Item List")
         for language in ("en", "pl", "es", "tlh"):
-            catalog = json.loads((Path("app/languages") / f"{language}.json").read_text())
+            catalog = json.loads((Path("app/languages") / f"{language}.json").read_text(encoding="utf-8"))
             for key in required_keys:
                 self.assertIn(key, catalog, msg=f"Missing {key!r} in {language}.json")
 

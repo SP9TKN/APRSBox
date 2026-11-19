@@ -553,9 +553,10 @@ class DigiFlowRuntimeService:
                 "drop_reason": "routing_queue_full",
             }
         self._max_queue_depth = max(self._max_queue_depth, self._queue.qsize())
-        source_is_aprsis = str(frame["source_kind"]) == APRSIS_FLOW_SOURCE_KIND
+        # DEBUG for every source: one line per received frame (RF too) pushed everything else out of the
+        # event log (about 6500 a day at the station); the frames are in the traffic logs anyway.
         log_event(
-            "DEBUG" if source_is_aprsis else "INFO",
+            "DEBUG",
             "digi_flow_runtime",
             (
                 "Enqueued DIGI Flow frame "

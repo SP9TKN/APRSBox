@@ -36,7 +36,15 @@ class WxSchedulerService:
 
     async def _run(self) -> None:
         while not self._stop_event.is_set():
-            await self._tick()
+            try:
+                await self._tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # one failed tick (e.g. database busy) must not stop the WX scheduler for good
+                try:
+                    log_event("WARNING", "wx", f"WX scheduler tick failed: {exc!r}. Retrying.")
+                except Exception:
+                    pass
             await self._sleep(self._poll_interval)
 
     async def _tick(self) -> None:

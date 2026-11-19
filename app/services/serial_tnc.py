@@ -1,17 +1,30 @@
 from __future__ import annotations
 
 import array
-import fcntl
 import os
 import select
-import termios
+import sys
 import time
 
-SUPPORTED_SERIAL_BAUD_RATES: dict[int, int] = {
-    value: getattr(termios, f"B{value}")
-    for value in (1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200)
-    if hasattr(termios, f"B{value}")
-}
+IS_WINDOWS = sys.platform == "win32"
+SERIAL_BAUD_RATE_CHOICES = (1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200)
+
+if IS_WINDOWS:
+    from app.services import serial_tnc_windows as _windows_serial
+
+    fcntl = None
+    termios = None
+    SUPPORTED_SERIAL_BAUD_RATES: dict[int, int] = {value: value for value in SERIAL_BAUD_RATE_CHOICES}
+else:
+    import fcntl
+    import termios
+
+    _windows_serial = None
+    SUPPORTED_SERIAL_BAUD_RATES = {
+        value: getattr(termios, f"B{value}")
+        for value in SERIAL_BAUD_RATE_CHOICES
+        if hasattr(termios, f"B{value}")
+    }
 
 
 def normalize_serial_device_path(value: object, *, label: str = "Serial device path") -> str:
@@ -34,6 +47,8 @@ def normalize_serial_baud_rate(value: object, *, label: str = "Baud rate") -> in
 def open_serial_device(path: str, baud_rate: int, *, flush_buffers: bool = True) -> int:
     normalized_path = normalize_serial_device_path(path)
     normalized_baud_rate = normalize_serial_baud_rate(baud_rate)
+    if IS_WINDOWS:
+        return _windows_serial.open_device(normalized_path, normalized_baud_rate, flush_buffers=flush_buffers)
     open_flags = os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK | int(getattr(os, "O_CLOEXEC", 0))
     fd = os.open(normalized_path, open_flags)
     try:
@@ -72,6 +87,14 @@ def close_serial_device(
 ) -> None:
     if fd is None:
         return
+    if IS_WINDOWS:
+        _windows_serial.close_device(
+            fd,
+            drain_timeout=drain_timeout,
+            flush_buffers=flush_buffers,
+            drop_control_lines=drop_control_lines,
+        )
+        return
     if drain_timeout > 0:
         try:
             _best_effort_drain(fd, timeout=drain_timeout)
@@ -91,6 +114,8 @@ def close_serial_device(
 
 
 def read_serial_chunk(fd: int, *, max_bytes: int = 1024, timeout: float = 1.0) -> bytes:
+    if IS_WINDOWS:
+        return _windows_serial.read_chunk(fd, max_bytes=max_bytes, timeout=timeout)
     try:
         readable, _, _ = select.select([fd], [], [], timeout)
     except InterruptedError:
@@ -104,6 +129,9 @@ def read_serial_chunk(fd: int, *, max_bytes: int = 1024, timeout: float = 1.0) -
 
 
 def write_serial_data(fd: int, data: bytes, *, timeout: float = 1.0, drain: bool = False) -> None:
+    if IS_WINDOWS:
+        _windows_serial.write_data(fd, data, timeout=timeout, drain=drain)
+        return
     deadline = time.monotonic() + timeout
     offset = 0
     while offset < len(data):
@@ -130,6 +158,9 @@ def write_serial_data(fd: int, data: bytes, *, timeout: float = 1.0, drain: bool
 def _best_effort_drain(fd: int, *, timeout: float) -> None:
     # Prefer a bounded drain strategy to avoid indefinite blocking on pseudo terminals
     # and edge-case drivers.
+    if IS_WINDOWS:
+        _windows_serial.drain(fd, timeout=timeout)
+        return
     tiocoutq = getattr(termios, "TIOCOUTQ", None)
     if tiocoutq is None:
         return
@@ -147,6 +178,9 @@ def _best_effort_drain(fd: int, *, timeout: float) -> None:
 
 
 def _best_effort_set_modem_lines(fd: int, *, dtr: bool | None, rts: bool | None) -> None:
+    if IS_WINDOWS:
+        _windows_serial.set_modem_lines(fd, dtr=dtr, rts=rts)
+        return
     tiocmbic = getattr(termios, "TIOCMBIC", None)
     tiocmbis = getattr(termios, "TIOCMBIS", None)
     dtr_mask = getattr(termios, "TIOCM_DTR", None)
@@ -179,3 +213,10 @@ def _best_effort_set_modem_lines(fd: int, *, dtr: bool | None, rts: bool | None)
             fcntl.ioctl(fd, tiocmbis, set_bits, True)
         except OSError:
             pass
+
+
+def list_serial_ports() -> list[dict[str, str]]:
+    """Serial ports for interface forms; empty on POSIX (paths are typed by hand)."""
+    if IS_WINDOWS:
+        return _windows_serial.list_serial_ports()
+    return []

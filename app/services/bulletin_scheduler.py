@@ -39,7 +39,15 @@ class BulletinSchedulerService:
 
     async def _run(self) -> None:
         while not self._stop_event.is_set():
-            await asyncio.to_thread(self._tick)
+            try:
+                await asyncio.to_thread(self._tick)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # one failed tick (e.g. database busy) must not stop the bulletin scheduler for good
+                try:
+                    log_event("WARNING", "outbound", f"Bulletin scheduler tick failed: {exc!r}. Retrying.")
+                except Exception:
+                    pass
             await self._sleep(self._poll_interval)
 
     def _tick(self) -> None:

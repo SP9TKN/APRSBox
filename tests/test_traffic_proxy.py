@@ -1,8 +1,6 @@
 import asyncio
 import contextlib
 import os
-import pty
-import select
 import socket
 import tempfile
 import unittest
@@ -18,6 +16,7 @@ from app.services.traffic import (
     _TrafficModemRuntime,
     _kiss_tcp_rx_silence_reconnect_seconds,
 )
+from serial_pair import master_write, pseudo_serial_device, read_master_chunk
 
 
 @contextlib.contextmanager
@@ -40,24 +39,6 @@ def free_tcp_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
-
-
-@contextlib.contextmanager
-def pseudo_serial_device() -> tuple[int, str]:
-    master_fd, slave_fd = pty.openpty()
-    slave_path = os.ttyname(slave_fd)
-    try:
-        yield master_fd, slave_path
-    finally:
-        os.close(master_fd)
-        os.close(slave_fd)
-
-
-def read_master_chunk(master_fd: int, *, timeout: float = 1.0) -> bytes:
-    readable, _, _ = select.select([master_fd], [], [], timeout)
-    if not readable:
-        return b""
-    return os.read(master_fd, 1024)
 
 
 def insert_modem(
@@ -185,8 +166,11 @@ class NativeTcpRxSilenceTests(unittest.IsolatedAsyncioTestCase):
 
             async def read(self, _max_bytes: int) -> bytes:
                 self.read_count += 1
-                if self.read_count <= 3:
-                    await asyncio.sleep(0.03)
+                if self.read_count <= 6:
+                    # Windows timers tick every ~15.6 ms, so 30 ms bytes against a 50 ms timeout were
+                    # flaky there. Bytes every 50 ms vs a 200 ms timeout leave room for scheduler
+                    # stalls, and without the reset the timeout still fires (6 x 50 ms > 200 ms).
+                    await asyncio.sleep(0.05)
                     return b"\x01"
                 return b""
 
@@ -204,7 +188,7 @@ class NativeTcpRxSilenceTests(unittest.IsolatedAsyncioTestCase):
                 modem,
                 "127.0.0.1",
                 8001,
-                rx_silence_reconnect_seconds=0.05,
+                rx_silence_reconnect_seconds=0.2,
             )
 
         self.assertFalse(
@@ -717,7 +701,7 @@ class TrafficProxyRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     await wait_until(lambda: service.snapshot()["expose"]["active_clients"] == 1, timeout=2.0)
 
                     serial_payload = build_tnc2_kiss_frame("SQ9MDD-4>APRS:>Serial proxy test")
-                    os.write(master_fd, serial_payload)
+                    master_write(master_fd, serial_payload)
                     self.assertEqual(
                         await asyncio.wait_for(client_reader.readexactly(len(serial_payload)), timeout=1.0),
                         serial_payload,

@@ -11,13 +11,18 @@ from typing import Any, Iterator
 from app.config import settings
 
 DEFAULT_EVENT_LOG_KEEP_ROWS = 5000
+# Warnings and errors are kept this long whatever the INFO traffic: the station's 5000 rows held less than a
+# day (one line per received frame), and the trace of a rare fault was gone before anyone looked (2026-10-28).
+DEFAULT_EVENT_LOG_WARNING_DAYS = 30
+_EVENT_LOG_LASTING_LEVELS: tuple[str, ...] = ("WARNING", "ERROR")
 EVENT_LOG_LEVELS: tuple[str, ...] = ("DEBUG", "INFO", "WARNING", "ERROR")
 EVENT_LOG_MIN_LEVEL_SETTING_KEY = "event_log_min_level"
 EVENT_LOG_DEBUG_ENABLED_SETTING_KEY = "event_log_debug_enabled"
 TRAFFIC_RETENTION_MINUTES_SETTING_KEY = "traffic_retention_minutes"
 DEFAULT_EVENT_LOG_MIN_LEVEL = "INFO"
 DEFAULT_TRAFFIC_RETENTION_MINUTES = 60
-TRAFFIC_RETENTION_ALLOWED_MINUTES: tuple[int, ...] = (*range(60, 361, 30), 720, 1440)
+# 48, 72 and 96 h added on the desktop (the user's choice) - the indexes on created_at keep it quick.
+TRAFFIC_RETENTION_ALLOWED_MINUTES: tuple[int, ...] = (*range(60, 361, 30), 720, 1440, 2880, 4320, 5760)
 DATABASE_INDEX_REPAIR_SETTING_KEY = "database.index_repair.version"
 DATABASE_INDEX_REPAIR_VERSION = "2026-07-index-repair-v1"
 DEFAULT_OUTBOUND_JOB_PRUNE_BATCH_SIZE = 500
@@ -39,6 +44,7 @@ RUNTIME_MAINTENANCE_RESET_TABLES: tuple[str, ...] = (
     "event_logs",
     "traffic_frames",
     "map_station_state",
+    "weather_observations",
     "digi_flow_event_log",
     "aprsis_igate_rf_heard",
     "aprsis_igate_station_state",
@@ -64,19 +70,33 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
-def ensure_runtime_dirs() -> None:
-    for directory in (
+# The directories already made in this process: connect() runs for nearly every query and four
+# mkdir calls cost about a third of opening a connection (measured on the desktop station).
+_runtime_dirs_ensured: tuple[Path, ...] | None = None
+
+
+def ensure_runtime_dirs(*, force: bool = False) -> None:
+    global _runtime_dirs_ensured
+    directories = (
         settings.data_dir,
         settings.log_dir,
         settings.config_dir,
         settings.backups_dir,
-    ):
+    )
+    if not force and directories == _runtime_dirs_ensured:
+        return
+    for directory in directories:
         directory.mkdir(parents=True, exist_ok=True)
+    _runtime_dirs_ensured = directories
 
 
 def connect() -> sqlite3.Connection:
     ensure_runtime_dirs()
-    connection = sqlite3.connect(settings.database_path)
+    try:
+        connection = sqlite3.connect(settings.database_path)
+    except sqlite3.OperationalError:
+        ensure_runtime_dirs(force=True)  # the data directory was removed while running
+        connection = sqlite3.connect(settings.database_path)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     connection.execute("PRAGMA journal_mode = WAL")
@@ -1105,6 +1125,32 @@ CREATE INDEX IF NOT EXISTS idx_aprsis_igate_station_state_time
     ON aprsis_igate_station_state(last_internet_origin_at DESC);
 CREATE INDEX IF NOT EXISTS idx_aprsis_igate_pending_position_expiry
     ON aprsis_igate_pending_position(expires_at);
+
+-- Weather readings of every station heard (RF, APRS-IS, CWOP) for the station charts; kept for
+-- 7 days by app.services.weather_history, longer than the traffic frames. One row per station
+-- and minute: the same report heard over RF and APRS-IS is stored once.
+CREATE TABLE IF NOT EXISTS weather_observations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    station_key TEXT NOT NULL COLLATE NOCASE,
+    observed_at TEXT NOT NULL,
+    minute TEXT NOT NULL,
+    source_kind TEXT NOT NULL DEFAULT '',
+    temperature_c REAL,
+    humidity_percent REAL,
+    pressure_hpa REAL,
+    wind_dir_deg REAL,
+    wind_speed_ms REAL,
+    wind_gust_ms REAL,
+    rain_1h_mm REAL,
+    rain_24h_mm REAL,
+    rain_midnight_mm REAL,
+    luminosity_wm2 REAL,
+    UNIQUE (station_key, minute)
+);
+CREATE INDEX IF NOT EXISTS idx_weather_observations_station_time
+    ON weather_observations(station_key, observed_at);
+CREATE INDEX IF NOT EXISTS idx_weather_observations_time
+    ON weather_observations(observed_at);
 """
 
 
@@ -3779,8 +3825,15 @@ def _normalize_app_setting_bool(value: Any) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "on", "yes"}
 
 
-def prune_event_logs(*, keep_rows: int) -> int:
+def prune_event_logs(*, keep_rows: int, warning_days: int = DEFAULT_EVENT_LOG_WARNING_DAYS) -> int:
+    """Keep the newest ``keep_rows`` DEBUG/INFO rows; WARNING/ERROR rows for ``warning_days`` days.
+
+    ``keep_rows=0`` empties the log (all levels).
+    """
     normalized_keep_rows = max(0, int(keep_rows))
+    lasting = _EVENT_LOG_LASTING_LEVELS
+    marks = ", ".join("?" for _ in lasting)
+    warning_cutoff = (datetime.now(timezone.utc) - timedelta(days=max(0, int(warning_days)))).replace(microsecond=0).isoformat()
     with get_connection() as connection:
         before_row = connection.execute("SELECT COUNT(*) AS total FROM event_logs").fetchone()
         before_total = int(before_row["total"]) if before_row is not None else 0
@@ -3788,16 +3841,22 @@ def prune_event_logs(*, keep_rows: int) -> int:
             connection.execute("DELETE FROM event_logs")
         else:
             connection.execute(
-                """
+                f"""
                 DELETE FROM event_logs
-                WHERE id NOT IN (
+                WHERE level NOT IN ({marks})
+                  AND id NOT IN (
                     SELECT id
                     FROM event_logs
+                    WHERE level NOT IN ({marks})
                     ORDER BY created_at DESC, id DESC
                     LIMIT ?
                 )
                 """,
-                (normalized_keep_rows,),
+                (*lasting, *lasting, normalized_keep_rows),
+            )
+            connection.execute(
+                f"DELETE FROM event_logs WHERE level IN ({marks}) AND created_at < ?",
+                (*lasting, warning_cutoff),
             )
         after_row = connection.execute("SELECT COUNT(*) AS total FROM event_logs").fetchone()
         after_total = int(after_row["total"]) if after_row is not None else 0

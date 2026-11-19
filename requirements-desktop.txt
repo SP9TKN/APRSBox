@@ -1,0 +1,7 @@
+# APRSBox for Windows - native window (no web server needed).
+#   py -3.13 -m venv .venv
+#   .venv\Scripts\python -m pip install -r requirements-desktop.txt
+PySide6-Essentials==6.11.2
+pyserial==3.5
+# OpenWebRX MQTT interfaces only:
+paho-mqtt==2.1.0

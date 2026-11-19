@@ -891,6 +891,9 @@ def _build_map_station_detail_rows(
         station["qsy_offset_khz"] = _integer_value(snapshot["data_raw"].get("qsy_offset_khz"))
         station["qsy_callsign"] = _string_or_none(snapshot["data_raw"].get("qsy_callsign"))
         station["destination"] = snapshot["destination"]
+        # Desktop map: a right click on the station draws where its latest frame went.
+        station["raw_text"] = snapshot.get("raw_text") or ""
+        station["raw_source_kind"] = snapshot.get("source_kind") or ""
     return stations
 
 
@@ -1232,17 +1235,39 @@ def _limit_mobile_track_points_by_interface(
     return kept_reversed
 
 
+# Station key and position parsed from each frame line of the last track scan.  The scan re-reads
+# the same recent frames on every map refresh and parsing them again was most of its time; a line
+# always parses the same way, so only new lines are parsed.  Replaced by each scan (bounded by it).
+_TRACK_POSITIONS: dict[str, tuple[str, float, float] | None] = {}
+
+
+def _track_position(line: str) -> tuple[str, float, float] | None:
+    parsed = parse_tnc2_frame(line)
+    if parsed is None:
+        return None
+    station_key = str(parsed.get("entity_name") or parsed.get("logical_source_key") or parsed.get("source_key") or "").strip()
+    if not station_key:
+        return None
+    aprs_data = parsed.get("aprs_data") or {}
+    latitude = _parse_coordinate(aprs_data.get("latitude"))
+    longitude = _parse_coordinate(aprs_data.get("longitude"))
+    if latitude is None or longitude is None or _is_null_island_point(latitude, longitude):
+        return None
+    return station_key, latitude, longitude
+
+
 def _build_mobile_track_points_by_station_keys(
     station_keys: dict[str, str],
 ) -> dict[str, list[dict[str, Any]]]:
+    global _TRACK_POSITIONS
     if not station_keys:
         return {}
 
     rows = fetch_all(
         """
-        SELECT line, interface_id, created_at
+        SELECT id, line, source_kind, interface_id, created_at
         FROM (
-            SELECT line, interface_id, created_at, id
+            SELECT line, source_kind, interface_id, created_at, id
             FROM traffic_frames
             WHERE format IN ('TNC2', 'TNC2-TX')
             ORDER BY created_at DESC, id DESC
@@ -1255,23 +1280,20 @@ def _build_mobile_track_points_by_station_keys(
 
     points_by_station: dict[str, list[dict[str, Any]]] = {}
     last_point_by_station_interface: dict[tuple[str, int | None], dict[str, Any]] = {}
+    known_positions = _TRACK_POSITIONS
+    positions: dict[str, tuple[str, float, float] | None] = {}
     for row in rows:
-        parsed = parse_tnc2_frame(str(row["line"] or ""))
-        if parsed is None:
+        line = str(row["line"] or "")
+        if line in positions:
+            position = positions[line]
+        else:
+            position = known_positions[line] if line in known_positions else _track_position(line)
+            positions[line] = position
+        if position is None:
             continue
-        station_key = str(parsed.get("entity_name") or parsed.get("logical_source_key") or parsed.get("source_key") or "").strip()
-        if not station_key:
-            continue
+        station_key, latitude, longitude = position
         resolved_key = station_keys.get(station_key.casefold())
         if not resolved_key:
-            continue
-
-        aprs_data = dict(parsed.get("aprs_data") or {})
-        latitude = _parse_coordinate(aprs_data.get("latitude"))
-        longitude = _parse_coordinate(aprs_data.get("longitude"))
-        if latitude is None or longitude is None:
-            continue
-        if _is_null_island_point(latitude, longitude):
             continue
 
         interface_id = _normalize_interface_id(row["interface_id"])
@@ -1285,9 +1307,14 @@ def _build_mobile_track_points_by_station_keys(
             "longitude": longitude,
             "interface_id": interface_id,
             "heard_at": str(row["created_at"] or ""),
+            # The received frame itself: who heard / digipeated / gated this position (map point details).
+            "frame_id": int(row["id"]),
+            "source_kind": str(row["source_kind"] or ""),
+            "line": str(row["line"] or ""),
         }
         points.append(point)
         last_point_by_station_interface[interface_point_key] = point
+    _TRACK_POSITIONS = positions
     return {
         station_key: _limit_mobile_track_points_by_interface(points)
         for station_key, points in points_by_station.items()

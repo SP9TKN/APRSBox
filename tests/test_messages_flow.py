@@ -2314,5 +2314,89 @@ class MessagesFlowTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(any(raw_line in message for message in matching_logs))
 
 
+
+class MutedSenderTests(unittest.TestCase):
+    def _station(self) -> None:
+        interface_id = insert_modem()
+        update_station_settings(station_payload(interface_id))
+        save_message_settings({"default_path": "", "receive_any_ssid": False, "target_groups": ["CQ"]})
+
+    def _shown(self) -> list[tuple[str, str]]:
+        return [
+            (str(conversation["callsign"]), str(message["text"]))
+            for conversation in get_messages_page_data()["conversations"]
+            for message in conversation["messages"]
+        ]
+
+    def test_muted_sender_is_hidden_and_new_messages_are_dropped(self) -> None:
+        from app.services.messages import set_message_sender_muted
+
+        with temporary_database():
+            self._station()
+            process_incoming_tnc2_message("CE4JWI-10>APRS::CQ       :Old spam{01", timestamp="2026-01-01T00:01:00+00:00")
+            process_incoming_tnc2_message("SP8ABC>APRS::CQ       :Hello{02", timestamp="2026-01-01T00:02:00+00:00")
+            self.assertEqual(get_unread_inbox_count(), 2)
+
+            set_message_sender_muted("ce4jwi-10", True)
+
+            self.assertEqual(get_message_settings()["muted_senders"], ["CE4JWI-10"])
+            self.assertEqual(self._shown(), [("CQ", "Hello")])  # the old one is hidden, not deleted
+            self.assertEqual(get_unread_inbox_count(), 1)
+            with patch("app.services.messages.queue_aprs_message_notification") as notification_mock:
+                process_incoming_tnc2_message("CE4JWI-10>APRS::CQ       :New spam{03", timestamp="2026-01-01T00:03:00+00:00")
+            notification_mock.assert_not_called()
+            stored = fetch_all("SELECT message_text FROM aprs_messages WHERE sender = 'CE4JWI-10' ORDER BY id")
+            self.assertEqual([row["message_text"] for row in stored], ["Old spam"])
+            process_incoming_tnc2_message("CE4JWI-7>APRS::CQ       :Other SSID{04", timestamp="2026-01-01T00:04:00+00:00")
+            self.assertIn(("CQ", "Other SSID"), self._shown())  # only CE4JWI-10 is muted
+
+            set_message_sender_muted("CE4JWI-10", False)
+
+            self.assertEqual(get_message_settings()["muted_senders"], [])
+            self.assertIn(("CQ", "Old spam"), self._shown())  # back after unmuting
+            self.assertNotIn(("CQ", "New spam"), self._shown())  # received while muted: dropped
+
+    def test_bare_callsign_mutes_every_ssid(self) -> None:
+        from app.services.messages import message_sender_is_muted, normalize_muted_message_senders
+
+        self.assertEqual(normalize_muted_message_senders(" ce4jwi , SP9XYZ-7,,CE4JWI\nsp9abc-0"), ["CE4JWI", "SP9XYZ-7", "SP9ABC"])
+        with self.assertRaises(ValueError):
+            normalize_muted_message_senders("CE4JWI/10")
+        self.assertTrue(message_sender_is_muted("CE4JWI-10", ["CE4JWI"]))
+        self.assertTrue(message_sender_is_muted("CE4JWI", ["CE4JWI"]))
+        self.assertFalse(message_sender_is_muted("CE4JWIX", ["CE4JWI"]))
+        self.assertFalse(message_sender_is_muted("SP9XYZ-8", ["SP9XYZ-7"]))
+        with temporary_database():
+            self._station()
+            settings = save_message_settings(
+                {"default_path": "", "receive_any_ssid": False, "target_groups": ["CQ"], "muted_senders": "ce4jwi"}
+            )
+            self.assertEqual(settings["muted_senders"], ["CE4JWI"])
+            process_incoming_tnc2_message("CE4JWI-10>APRS::CQ       :One{01", timestamp="2026-01-01T00:01:00+00:00")
+            process_incoming_tnc2_message("CE4JWI-7>APRS::CQ       :Two{02", timestamp="2026-01-01T00:02:00+00:00")
+            process_incoming_tnc2_message("CE4JWI>APRS::BLN1     :Bulletin", timestamp="2026-01-01T00:03:00+00:00")
+            self.assertEqual(int(fetch_one("SELECT COUNT(*) AS total FROM aprs_messages")["total"]), 0)
+            self.assertEqual(int(fetch_one("SELECT COUNT(*) AS total FROM aprs_message_conversations")["total"]), 0)
+            # Saving the settings without the field keeps the list.
+            settings = save_message_settings({"default_path": "", "receive_any_ssid": False, "target_groups": ["CQ"]})
+            self.assertEqual(settings["muted_senders"], ["CE4JWI"])
+
+    def test_private_message_from_a_muted_sender_is_acked_but_not_shown(self) -> None:
+        from app.services.messages import set_message_sender_muted
+
+        with temporary_database():
+            self._station()
+            set_message_sender_muted("SP8ABC", True)
+
+            process_incoming_tnc2_message("SP8ABC>APRS::SQ9MDD-4 :Are you there{07", timestamp="2026-01-01T00:01:00+00:00")
+
+            self.assertIsNone(fetch_one("SELECT id FROM aprs_messages WHERE direction = 'rx'"))
+            self.assertEqual(get_messages_page_data()["conversations"], [])
+            acks = fetch_all("SELECT payload_json AS payload FROM outbound_jobs WHERE kind = 'message' ORDER BY id")
+            self.assertTrue(acks)  # the sender stops retrying
+            self.assertTrue(all("ack07" in str(row["payload"]) for row in acks))
+            self.assertTrue(all("SP8ABC" in str(row["payload"]) for row in acks))
+
+
 if __name__ == "__main__":
     unittest.main()

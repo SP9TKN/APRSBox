@@ -180,7 +180,7 @@ class RfTxDispatcher:
         if time.monotonic() - job.received_monotonic > job.max_age_seconds:
             return
 
-        frame = build_tnc2_kiss_frame(job.line)
+        frame = build_tnc2_kiss_frame(job.line, allow_utf8=True)  # repeated as heard
         interface_id = int(modem["id"])
         sent = False
         if self._traffic_monitor is not None:

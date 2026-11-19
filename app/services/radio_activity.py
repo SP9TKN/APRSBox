@@ -136,12 +136,20 @@ class RadioActivityAggregatorService:
 
     async def _run(self) -> None:
         while not self._stop_event.is_set():
-            await asyncio.to_thread(
-                run_radio_activity_aggregation,
-                state_key=self._state_key,
-                bucket_minutes=self._bucket_minutes,
-                safety_delay_seconds=self._safety_delay_seconds,
-            )
+            try:
+                await asyncio.to_thread(
+                    run_radio_activity_aggregation,
+                    state_key=self._state_key,
+                    bucket_minutes=self._bucket_minutes,
+                    safety_delay_seconds=self._safety_delay_seconds,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # one failed pass (e.g. database busy) must not stop the statistics for good
+                try:
+                    log_event("WARNING", "radio_activity", f"Radio activity aggregation failed: {exc!r}. Retrying.")
+                except Exception:
+                    pass
             await self._sleep(self._poll_interval)
 
     async def _sleep(self, delay: float) -> None:

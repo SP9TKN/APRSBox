@@ -1,8 +1,6 @@
 import asyncio
 import contextlib
 import os
-import pty
-import select
 import tempfile
 import threading
 import time
@@ -13,6 +11,7 @@ from unittest.mock import patch
 from app.db import init_db
 from app.services import serial_broker as serial_broker_module
 from app.services.serial_broker import RxSilenceReconnectWatchdog, SerialKissTcpBroker
+from serial_pair import master_write, pseudo_serial_device, read_master_chunk
 
 
 @contextlib.contextmanager
@@ -31,17 +30,6 @@ def temporary_database() -> Path:
                 os.environ["APRSBOX_DB_PATH"] = previous
 
 
-@contextlib.contextmanager
-def pseudo_serial_device() -> tuple[int, str]:
-    master_fd, slave_fd = pty.openpty()
-    slave_path = os.ttyname(slave_fd)
-    try:
-        yield master_fd, slave_path
-    finally:
-        os.close(master_fd)
-        os.close(slave_fd)
-
-
 async def wait_until(predicate, *, timeout: float = 2.0) -> None:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
@@ -50,13 +38,6 @@ async def wait_until(predicate, *, timeout: float = 2.0) -> None:
             return
         await asyncio.sleep(0.05)
     raise AssertionError("Condition was not met before timeout.")
-
-
-def read_master_chunk(master_fd: int, *, timeout: float = 1.0) -> bytes:
-    readable, _, _ = select.select([master_fd], [], [], timeout)
-    if not readable:
-        return b""
-    return os.read(master_fd, 1024)
 
 
 class SerialBrokerTests(unittest.IsolatedAsyncioTestCase):
@@ -137,7 +118,7 @@ class SerialBrokerTests(unittest.IsolatedAsyncioTestCase):
                     await broker.start()
                     reader, writer = await asyncio.open_connection("127.0.0.1", broker.port)
                     payload = bytes([0xC0, 0x00, 0xDB, 0xDC, 0xDB, 0xDD, 0x7F, 0xC0])
-                    os.write(master_fd, payload)
+                    master_write(master_fd, payload)
                     self.assertEqual(await asyncio.wait_for(reader.readexactly(len(payload)), timeout=1.0), payload)
                 finally:
                     if writer is not None:

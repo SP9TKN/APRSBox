@@ -4,6 +4,7 @@ import asyncio
 import json
 import random
 import time
+import traceback
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -152,12 +153,23 @@ class OutboundService:
 
     async def _run(self) -> None:
         while not self._stop_event.is_set():
-            expire_direct_message_timeouts()
-            job = claim_next_outbound_job()
-            if job is None:
-                await self._sleep(self._poll_interval)
-                continue
-            await self._process_job(job)
+            # One database error (e.g. busy) used to end this task for good: the queue stopped while the rest of
+            # APRSBox ran on (the user's station, 2026-10-27: no beacon for 40 h). Log it and go on.
+            try:
+                expire_direct_message_timeouts()
+                job = claim_next_outbound_job()
+                if job is None:
+                    await self._sleep(self._poll_interval)
+                    continue
+                await self._process_job(job)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                try:
+                    log_event("WARNING", "outbound", f"Outbound worker loop failed: {exc!r}. Retrying.\n{traceback.format_exc()}")
+                except Exception:
+                    pass
+                await self._sleep(max(self._poll_interval, 5.0))
 
     async def _process_job(self, job: dict[str, Any]) -> None:
         job_id = int(job["id"])

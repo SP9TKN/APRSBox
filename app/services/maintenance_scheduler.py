@@ -50,7 +50,15 @@ class MaintenanceSchedulerService:
 
     async def _run(self) -> None:
         while not self._stop_event.is_set():
-            await asyncio.to_thread(self._tick)
+            try:
+                await asyncio.to_thread(self._tick)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # one failed tick (e.g. database busy) must not stop the maintenance scheduler for good
+                try:
+                    log_event("WARNING", "maintenance", f"Maintenance scheduler tick failed: {exc!r}. Retrying.")
+                except Exception:
+                    pass
             await self._sleep(self._poll_interval)
 
     def _tick(self, now: datetime | None = None) -> None:
@@ -84,6 +92,14 @@ class MaintenanceSchedulerService:
         except Exception as exc:
             message = str(exc).strip() or exc.__class__.__name__
             log_event("WARNING", "maintenance", f"Automatic traffic frame pruning failed: {message}")
+        try:
+            from app.services.weather_history import backfill_weather_history, prune_weather_observations
+
+            backfill_weather_history()
+            prune_weather_observations(now=current)
+        except Exception as exc:
+            message = str(exc).strip() or exc.__class__.__name__
+            log_event("WARNING", "maintenance", f"Weather history maintenance failed: {message}")
         try:
             prune_outbound_jobs_batch(limit=OUTBOUND_JOB_PRUNE_BATCH_SIZE)
         except Exception as exc:

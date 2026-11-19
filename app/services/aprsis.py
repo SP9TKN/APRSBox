@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from app import get_version
-from app.db import fetch_one, get_app_setting, get_connection, log_event, set_app_setting, utc_now
+from app.db import connection_scope, fetch_one, get_app_setting, get_connection, log_event, set_app_setting, utc_now
 from app.services.alarm_groups import build_effective_aprsis_filter
 from app.services.rx_side_effect_dispatcher import (
     RX_SIDE_EFFECT_QUEUE_MAX_FRAMES,
@@ -1099,6 +1099,10 @@ def aprsis_runtime_badge(status: str) -> str:
 
 
 class AprsisClientService:
+    # Shown as the source of the received frames ("APRS-IS · <interface>"); the CWOP receiver
+    # (app.services.cwop) reuses this client with its own label, status and settings.
+    _source_label = "APRS-IS"
+
     def __init__(
         self,
         *,
@@ -1220,12 +1224,25 @@ class AprsisClientService:
         log_event("DEBUG", "aprsis_latency", " | ".join(metrics_parts))
         return True, "APRS-IS TX sent."
 
+    def _persist_status(self, **status: Any) -> None:
+        persist_aprsis_runtime_status(**status)
+
+    async def _open_connection(self, server: str, port: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        # The CWOP receiver (app.services.cwop) picks the server address itself.
+        return await asyncio.wait_for(asyncio.open_connection(server, port), timeout=8.0)
+
+    @staticmethod
+    def _read_desired_state() -> tuple[dict[str, Any] | None, dict[str, Any]]:
+        # Read every poll interval (1 s): one connection for all of it.  A new connection for each
+        # setting read took about 12% of a CPU core on the desktop station (py-spy, 2026-10-09).
+        with connection_scope():
+            return get_enabled_aprsis_interface(), get_aprsis_config()
+
     async def _run(self) -> None:
         while not self._stop_event.is_set():
-            rx_interface = get_enabled_aprsis_interface()
+            rx_interface, config = self._read_desired_state()
             self._desired_rx_interface = dict(rx_interface) if rx_interface is not None else None
             desired_active = rx_interface is not None
-            config = get_aprsis_config()
             config_key = (
                 str(config["server"]),
                 int(config["port"]),
@@ -1242,7 +1259,7 @@ class AprsisClientService:
                 continue
 
             if not config_key[2]:
-                persist_aprsis_runtime_status(
+                self._persist_status(
                     status=APRSIS_STATUS_ERROR,
                     status_detail="APRS-IS login is empty. Configure My Station callsign or set APRS-IS login override.",
                     server=config_key[0],
@@ -1283,7 +1300,7 @@ class AprsisClientService:
         rx_interface: dict[str, Any] | None = None,
     ) -> None:
         server, port, login, passcode = config_key
-        persist_aprsis_runtime_status(
+        self._persist_status(
             status=APRSIS_STATUS_CONNECTING,
             status_detail=f"Connecting to APRS-IS {server}:{port} as {login}.",
             server=server,
@@ -1293,10 +1310,10 @@ class AprsisClientService:
             last_error=None,
         )
         try:
-            reader, writer = await asyncio.wait_for(asyncio.open_connection(server, port), timeout=8.0)
+            reader, writer = await self._open_connection(server, port)
         except (OSError, TimeoutError) as exc:
             error = str(exc).strip() or exc.__class__.__name__
-            persist_aprsis_runtime_status(
+            self._persist_status(
                 status=APRSIS_STATUS_ERROR,
                 status_detail=f"APRS-IS connection failed: {error}",
                 server=server,
@@ -1321,7 +1338,7 @@ class AprsisClientService:
             writer.close()
             with contextlib.suppress(OSError):
                 await writer.wait_closed()
-            persist_aprsis_runtime_status(
+            self._persist_status(
                 status=APRSIS_STATUS_ERROR,
                 status_detail=f"APRS-IS login send failed: {error}",
                 server=server,
@@ -1344,7 +1361,7 @@ class AprsisClientService:
                 self._reader_loop(reader=reader, config_key=config_key),
                 name="aprsbox-aprsis-reader",
             )
-        persist_aprsis_runtime_status(
+        self._persist_status(
             status=APRSIS_STATUS_CONNECTED,
             status_detail=f"Connected to APRS-IS {server}:{port} as {login}.",
             server=server,
@@ -1420,7 +1437,7 @@ class AprsisClientService:
 
         if config_key is None:
             if status == APRSIS_STATUS_INACTIVE:
-                persist_aprsis_runtime_status(
+                self._persist_status(
                     status=APRSIS_STATUS_INACTIVE,
                     status_detail=reason,
                     connected_at=None,
@@ -1429,7 +1446,7 @@ class AprsisClientService:
             return
 
         server, port, login, _passcode = config_key
-        persist_aprsis_runtime_status(
+        self._persist_status(
             status=status,
             status_detail=reason,
             server=server,
@@ -1521,7 +1538,8 @@ class AprsisClientService:
         if rx_interface is None:
             return False
         try:
-            interface_id = int(rx_interface["id"])
+            # None: a feed without an interface row of its own (the CWOP receiver).
+            interface_id = int(rx_interface["id"]) if rx_interface.get("id") is not None else None
         except (KeyError, TypeError, ValueError):
             return False
         interface_name = str(rx_interface.get("name") or f"APRSIS #{interface_id}").strip()
@@ -1534,7 +1552,7 @@ class AprsisClientService:
         received_monotonic = time.monotonic()
         processing_started_monotonic = time.monotonic()
         side_effect_kwargs = {
-            "source": f"APRS-IS · {interface_name}",
+            "source": f"{self._source_label} · {interface_name}",
             "source_kind": "aprsis",
             "source_interface_id": interface_id,
             "band": "",
