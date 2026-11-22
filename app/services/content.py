@@ -1295,6 +1295,7 @@ def traffic_snapshot(limit: int = 400, *, alerts_only: bool = False) -> dict[str
             {
                 "id": int(row["id"]),
                 "timestamp": _format_monitor_timestamp(row["created_at"]),
+                "created_at": row["created_at"],
                 "source": row["source"],
                 "source_kind": source_kind,
                 "is_rf": source_kind == RF_SOURCE_KIND,

@@ -10,6 +10,7 @@
   ``app.services.wx.test_wx_source_connection``) are not tests.
 * Windows autostart is a stand-in kept in memory: the real one writes to the
   user's registry, and clicking every button in Settings changed it.
+* findu.com (the station traffic analyzer's extra) is offline.
 """
 
 from __future__ import annotations
@@ -71,6 +72,19 @@ def _keep_windows_autostart_in_memory() -> None:
 
 
 _keep_windows_autostart_in_memory()
+
+
+def _keep_findu_offline() -> None:
+    """The traffic analyzer may ask findu.com; tests never go to the internet."""
+    from app.desktop import station_analysis
+
+    def offline(url: str) -> str:
+        raise OSError(f"tests are offline: {url}")
+
+    station_analysis._fetch = offline
+
+
+_keep_findu_offline()
 
 
 def pytest_sessionstart(session: pytest.Session) -> None:

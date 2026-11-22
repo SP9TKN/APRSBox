@@ -26,6 +26,7 @@ ROW_STYLES: dict[str, tuple[str, float, int]] = {
     "traffic-log-row-aprsis-rx": ("traffic-color-aprsis-rx", 0.09, 3),
     "traffic-log-row-aprsis-to-rf-tx": ("traffic-color-aprsis-to-rf-tx", 0.26, 5),
     "traffic-log-row-emergency": ("danger", 0.14, 5),
+    "traffic-log-row-remote": ("muted", 0.10, 3),  # another station's receive page (SP9DLM 8080)
 }
 
 LEGEND_ENTRIES: tuple[tuple[str, str], ...] = (
@@ -39,6 +40,7 @@ LEGEND_ENTRIES: tuple[tuple[str, str], ...] = (
     ("traffic-log-row-proxy-tx", "Shared KISS port TX"),
     ("traffic-log-row-aprsis-rx", "APRS-IS RX"),
     ("traffic-log-row-aprsis-to-rf-tx", "APRS-IS to RF TX"),
+    ("traffic-log-row-remote", "Heard by the remote receiver (its receive page)"),
 )
 
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from app.desktop.i18n import t, tf
@@ -31,6 +31,7 @@ from app.desktop.widgets.common import (
 )
 from app.desktop.widgets.map_view import MapMarker, MapView, map_mask, stored_mask_percent
 from app.desktop.widgets.table import Column, DataTable
+from app.desktop.widgets.traffic_analyzer import TrafficAnalyzerCard
 from app.desktop.widgets.weather_charts import WeatherPanel
 
 
@@ -91,7 +92,10 @@ class StationDetailPage(Page):
         self.callsign = ""
         self.current_argument = None
         back = button(t("Stations"), variant="secondary", icon_name="arrow-left", on_click=lambda: self.navigate("stations"))
-        self.body.addLayout(hbox(back, 1))
+        # The user's choice: right of the back arrow; the analysis appears at the bottom of the card.
+        self.analyzer_button = button(t("Traffic analyzer"), variant="secondary", icon_name="chart-box-outline",
+                                      on_click=self._open_analyzer)
+        self.body.addLayout(hbox(back, self.analyzer_button, 1))
         self.header_card = Card()
         header = QHBoxLayout()
         titles = QVBoxLayout()
@@ -172,6 +176,8 @@ class StationDetailPage(Page):
         self.ssids_layout = FlowLayout(self.ssids_host, spacing=6)
         self.ssids_card.add(self.ssids_host)
         self.body.addWidget(self.ssids_card)
+        self.analyzer_card = TrafficAnalyzerCard(on_shown=self._scroll_to_analyzer)
+        self.body.addWidget(self.analyzer_card)
         self.body.addStretch(1)
         self.loader = SerialLoader(self._load, self._apply, self)
         self.auto_refresh_ms = 30000
@@ -179,6 +185,8 @@ class StationDetailPage(Page):
 
     def open_argument(self, argument: Any) -> None:
         if argument:
+            if str(argument) != self.callsign and hasattr(self, "analyzer_card"):
+                self.analyzer_card.reset()  # another station: the old analysis goes
             self.callsign = str(argument)
             self.current_argument = self.callsign
 
@@ -359,6 +367,15 @@ class StationDetailPage(Page):
             chip.clicked.connect(lambda _checked=False, value=callsign: self.navigate("station-detail", value))
             self.ssids_layout.addWidget(chip)
             chip.show()
+
+    def _open_analyzer(self) -> None:
+        self.analyzer_card.start(self.callsign)
+        self._scroll_to_analyzer()
+
+    def _scroll_to_analyzer(self) -> None:
+        scroll = getattr(self, "scroll", None)
+        if scroll is not None:
+            QTimer.singleShot(0, lambda: scroll.ensureWidgetVisible(self.analyzer_card, 0, 0))
 
     def _open_messages(self) -> None:
         if self.callsign:

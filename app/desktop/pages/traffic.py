@@ -150,6 +150,8 @@ class TrafficLogsDialog(QDialog):
 
 
 def interface_key(item: dict[str, Any]) -> str:
+    if item.get("remote_key"):  # another station's receive page (Settings -> Desktop application)
+        return str(item["remote_key"])
     if isinstance(item.get("modem_id"), int):
         return f"modem:{item['modem_id']}"
     return f"fallback:{item.get('name') or ''}:{item.get('band') or ''}"
@@ -165,6 +167,8 @@ def filter_frames(snapshot: dict[str, Any], *, hidden_interfaces: set[str], quic
     for frame in snapshot.get("frames") or []:
         interface_id = frame.get("interface_id")
         if isinstance(interface_id, int) and interface_id in by_id and interface_id not in visible_ids:
+            continue
+        if frame.get("remote_key") and frame["remote_key"] in hidden_interfaces:
             continue
         direction = str(frame.get("direction") or "").strip().upper()
         command = str(frame.get("command") or "").strip().upper()
@@ -255,11 +259,22 @@ class TrafficPage(Page):
         self.loader.request()
 
     def _load(self) -> dict[str, Any]:
+        from app.desktop.remote_receivers import monitor_interface, monitor_rows
         from app.desktop.traffic_logs import enabled_interface_ids
         from app.services.content import traffic_snapshot
 
         # traffic_snapshot() may be cached: copy before adding the log switches.
-        return {**traffic_snapshot(), "log_enabled": sorted(enabled_interface_ids())}
+        snapshot = {**traffic_snapshot(), "log_enabled": sorted(enabled_interface_ids())}
+        remote = monitor_interface()
+        if remote is not None:
+            # The remote receiver's rows (the user: under 70 cm, 2 m and APRS-IS) within the time the log covers.
+            frames = list(snapshot.get("frames") or [])
+            since = min((str(frame.get("created_at") or "") for frame in frames), default="") or "0"
+            merged = frames + monitor_rows(since_iso=since)
+            merged.sort(key=lambda frame: str(frame.get("created_at") or ""), reverse=True)
+            snapshot["frames"] = merged
+            snapshot["interfaces"] = list(snapshot.get("interfaces") or []) + [remote]
+        return snapshot
 
     def _apply(self, snapshot: dict[str, Any]) -> None:
         self.snapshot = snapshot or {"interfaces": [], "frames": []}
@@ -315,6 +330,10 @@ class TrafficPage(Page):
                                            self._toggle_log(value, name, not on))
                 self.interfaces_layout.addWidget(log_toggle, row, 4)
             parts = [str(item.get("status") or "-"), str(item.get("status_detail") or "")]
+            if item.get("remote_key"):
+                parts = [str(item.get("status") or "-"), tf("receive page {url}, read every minute", url=item.get("url") or "")]
+                if item.get("last_new_row"):
+                    parts.append(tf("last new entry {time}", time=item["last_new_row"]))
             expose = item.get("expose") or {}
             if expose.get("listen_endpoint"):
                 parts.append(f"{t('Listening')} {expose.get('listen_endpoint')}")

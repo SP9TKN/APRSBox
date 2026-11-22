@@ -5,13 +5,13 @@ from __future__ import annotations
 from typing import Any
 
 from PySide6.QtCore import QSize, Qt
-from PySide6.QtWidgets import QComboBox, QHBoxLayout, QToolButton
+from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLineEdit, QToolButton
 
 from app.desktop.i18n import t
 from app.desktop.icons import icon, symbol_pixmap
 from app.desktop.map_layers import parse_float, symbol_overlay
 from app.desktop.tasks import SerialLoader
-from app.desktop.widgets.common import Card, Page, label
+from app.desktop.widgets.common import Card, Page, label, line_edit
 from app.desktop.widgets.table import Column, DataTable
 
 REFRESH_OPTIONS = ((5000, "5s"), (10000, "10s"), (30000, "30s"), (60000, "1min"), (300000, "5min"))
@@ -50,6 +50,10 @@ def filter_counts(stations: list[dict[str, Any]]) -> dict[str, int]:
     return {name: sum(1 for station in stations if matches_filter(station, name)) for name, _caption, _icon in FILTERS}
 
 
+def station_callsign(station: dict[str, Any]) -> str:
+    return str(station.get("display_callsign") or station.get("callsign") or "")
+
+
 def data_text(station: dict[str, Any]) -> str:
     items = station.get("data") or []
     return " · ".join(str(item.get("value")) for item in items if isinstance(item, dict) and item.get("value"))
@@ -69,6 +73,15 @@ class StationsPage(Page):
         summary = Card()
         header = QHBoxLayout()
         header.addWidget(label(t("Stations"), "h2"))
+        # Callsign search (the user's choice): Enter keeps the stations whose callsign contains the text,
+        # together with the type filter; an empty field (Enter or the clear button) shows them all again.
+        self.search = line_edit("", placeholder=t("Search callsign"))
+        self.search.addAction(icon("magnify", None, 18), QLineEdit.ActionPosition.LeadingPosition)
+        self.search.setClearButtonEnabled(True)
+        self.search.setMaximumWidth(240)
+        self.search.returnPressed.connect(self._search)
+        self.search.textChanged.connect(lambda value: self._search() if not value else None)
+        header.addWidget(self.search)
         header.addStretch(1)
         self.filter_buttons: dict[str, QToolButton] = {}
         for name, caption, icon_name in FILTERS:
@@ -168,6 +181,9 @@ class StationsPage(Page):
         for key, filter_button in self.filter_buttons.items():
             filter_button.setChecked(key == name)
         self.table.set_filter(lambda row: matches_filter(row, self.active_filter))
+
+    def _search(self) -> None:
+        self.table.set_text_filter(self.search.text(), station_callsign)
 
     def _refresh_rate_changed(self) -> None:
         value = int(self.refresh_combo.currentData() or 10000)

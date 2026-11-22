@@ -54,6 +54,17 @@ CALLSIGN_RE = re.compile(r"^[A-Z0-9]{1,6}(-([0-9]|1[0-5]))?$")
 GROUP_RE = re.compile(r"^[A-Z0-9]{1,9}$")
 REFRESH_MS = 5000
 HISTORY_WINDOW = 60  # newest messages shown at first; "Older messages" adds more
+# The read-only "RF traffic" channel: every message frame heard or sent on RF (app.services.rf_message_log).
+RF_CHANNEL_ID = "rf-traffic"
+RF_CHANNEL_KIND = "rf_traffic"
+RF_ORIGIN_LABELS = {
+    "rx": ("Received", "neutral"),
+    "own": ("Sent", "accent"),
+    "digi": ("Repeated by my digipeater", "warn"),
+    "aprsis_to_rf": ("From APRS-IS to RF", "warn"),
+    "proxy": ("Sent by a KISS client", "warn"),
+}
+RF_KIND_LABELS = {"ack": "ACK", "rej": "REJ", "telemetry": "Telemetry", "bulletin": "Bulletin", "query": "Query"}
 
 
 def normalize_callsign(value: Any) -> str:
@@ -122,6 +133,15 @@ def parse_utc(value: Any) -> datetime | None:
     except ValueError:
         return None
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def band_label(band: Any) -> str:
+    """'2m' -> '2 m', '70cm' -> '70 cm' (the interface band)."""
+    value = str(band or "").strip()
+    for unit in ("cm", "m"):
+        if value.lower().endswith(unit) and value[: -len(unit)].strip().isdigit():
+            return f"{value[: -len(unit)].strip()} {unit}"
+    return value
 
 
 def delivery_label(message: dict[str, Any]) -> str:
@@ -221,6 +241,63 @@ class MessageBubble(QFrame):
         painter.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 12, 12)
 
 
+class RfTrafficBubble(QFrame):
+    """One copy of a message frame on RF: who to whom, the text, band, path. Read only."""
+
+    def __init__(self, message: dict[str, Any], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        colors = current_colors()
+        rx = message.get("direction") == "rx"
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(3)
+        caption = f"{normalize_callsign(message.get('sender'))} → {normalize_callsign(message.get('addressee'))}"
+        layout.addWidget(label(caption, "h3", selectable=True))
+        body = str(message.get("text") or "")
+        text = label(body, None, wrap=True, selectable=True)
+        text.setMinimumWidth(min(text.fontMetrics().horizontalAdvance(body) + 4, 520))
+        text.setMaximumWidth(520)
+        layout.addWidget(text)
+        meta = QHBoxLayout()
+        meta.setSpacing(8)
+        timestamp = parse_utc(message.get("timestamp"))
+        meta.addWidget(label(timestamp.strftime("%H:%M:%S UTC") if timestamp else str(message.get("timestamp") or ""), "small"))
+        band = band_label(message.get("band")) or str(message.get("interface_name") or "")
+        if band:
+            band_badge = Badge(band, "neutral")
+            band_badge.setToolTip(str(message.get("interface_name") or ""))
+            meta.addWidget(band_badge)
+        origin_text, origin_tone = RF_ORIGIN_LABELS.get(str(message.get("origin") or ""), ("", "neutral"))
+        if origin_text:
+            meta.addWidget(Badge(t(origin_text), origin_tone))
+        kind = RF_KIND_LABELS.get(str(message.get("kind") or ""))
+        if kind:
+            meta.addWidget(Badge(t(kind), "neutral"))
+        if message.get("message_number"):
+            meta.addWidget(label(f"#{message.get('message_number')}", "small"))
+        meta.addStretch(1)
+        layout.addLayout(meta)
+        route = tf("Path: {path}", path=str(message.get("path") or "-"))
+        if message.get("relay"):
+            route = f"{route} · {tf('put on RF by {relay} (from the internet)', relay=message.get('relay'))}"
+        layout.addWidget(label(route, "small", wrap=True, selectable=True))
+        accent = colors.color("accent")
+        if rx:
+            self._background = colors.color("panel-alt")
+            self._border = colors.color("border")
+        else:
+            self._background = mix(accent, colors.color("panel"), 0.22 if colors.is_dark else 0.14)
+            self._border = mix(accent, colors.color("panel"), 0.46 if colors.is_dark else 0.33)
+        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Maximum)
+
+    def paintEvent(self, event: Any) -> None:  # noqa: N802 - Qt API
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(QPen(self._border, 1))
+        painter.setBrush(self._background)
+        painter.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 12, 12)
+
+
 class MessagesPage(Page):
     page_key = "messages"
 
@@ -236,6 +313,9 @@ class MessagesPage(Page):
         self._history_limit = HISTORY_WINDOW
         self._history_last_day = ""
         self._list_signature = ""
+        # Not a conversation: never counted as unread or written to; checked and cleared like one (the user's choice).
+        self.rf_channel: dict[str, Any] = {"id": RF_CHANNEL_ID, "callsign": t("RF traffic"), "kind": RF_CHANNEL_KIND,
+                                           "messages": [], "total": 0, "unread_count": 0}
 
         shell = QSplitter(Qt.Orientation.Horizontal)
         shell.setChildrenCollapsible(False)
@@ -377,14 +457,22 @@ class MessagesPage(Page):
 
     def _load(self) -> dict[str, Any]:
         from app.services.messages import get_messages_page_data
+        from app.services.rf_message_log import list_rf_message_log
 
-        return get_messages_page_data()
+        view = get_messages_page_data()
+        # The RF traffic channel: the newest copies, more once "Older messages" is clicked there.
+        view["rf_traffic"] = list_rf_message_log(limit=self._history_limit if self.active_id == RF_CHANNEL_ID else HISTORY_WINDOW)
+        return view
 
     def _apply(self, view: dict[str, Any]) -> None:
         self.view = view or {}
         self.composer_limit = int(self.view.get("composer_limit") or 67)
         self.default_path = str(self.view.get("default_path") or "")
         self.conversations = list(self.view.get("conversations") or [])
+        rf_traffic = self.view.get("rf_traffic")
+        if rf_traffic is not None:  # a view reloaded after an action has no channel: it stays as it was
+            self.rf_channel["messages"] = list(rf_traffic.get("items") or [])
+            self.rf_channel["total"] = int(rf_traffic.get("total") or 0)
         if not self._settings_loaded:
             self._settings_loaded = True
             settings = self.view.get("message_settings") or {}
@@ -394,8 +482,8 @@ class MessagesPage(Page):
             self.muted_senders.setText(", ".join(settings.get("muted_senders") or []))
             self.receive_any.setChecked(bool(settings.get("receive_any_ssid")))
         ids = {str(item.get("id")) for item in self.conversations}
-        self.checked &= ids
-        if self.active_id not in ids:
+        self.checked &= ids | {RF_CHANNEL_ID}
+        if self.active_id not in ids and self.active_id != RF_CHANNEL_ID:
             unread = next((item for item in self.conversations if int(item.get("unread_count") or 0) > 0), None)
             chosen = unread or (self.conversations[0] if self.conversations else None)
             self.active_id = str(chosen.get("id")) if chosen else None
@@ -409,6 +497,8 @@ class MessagesPage(Page):
 
     # -------------------------------------------------------------- rendering
     def _active(self) -> dict[str, Any] | None:
+        if self.active_id == RF_CHANNEL_ID:
+            return self.rf_channel
         return next((item for item in self.conversations if str(item.get("id")) == self.active_id), None)
 
     def _render(self) -> None:
@@ -428,12 +518,22 @@ class MessagesPage(Page):
     def _render_list(self) -> None:
         signature = repr([(item.get("id"), item.get("callsign"), item.get("unread_count"), item.get("heard_recently_state"),
                            item.get("last_activity_at"), str(item.get("id")) == self.active_id, str(item.get("id")) in self.checked)
-                          for item in self.conversations])
+                          for item in self.conversations]) + repr((self.active_id == RF_CHANNEL_ID, RF_CHANNEL_ID in self.checked))
         if signature == self._list_signature:
             return
         self._list_signature = signature
         self.list.blockSignals(True)
         self.list.clear()
+        rf_item = QListWidgetItem(t("RF traffic"))
+        rf_item.setIcon(icon_pixmap("access-point", current_colors().color("accent"), 18))
+        rf_item.setToolTip(t("Every message heard or sent on RF (2 m, 70 cm), read only"))
+        rf_item.setData(Qt.ItemDataRole.UserRole, RF_CHANNEL_ID)
+        rf_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsUserCheckable)
+        rf_item.setCheckState(Qt.CheckState.Checked if RF_CHANNEL_ID in self.checked else Qt.CheckState.Unchecked)
+        self.list.addItem(rf_item)
+        if self.active_id == RF_CHANNEL_ID:
+            rf_item.setSelected(True)
+            self.list.setCurrentItem(rf_item)
         if not self.conversations:
             empty = QListWidgetItem(t("No conversations loaded."))
             empty.setFlags(Qt.ItemFlag.NoItemFlags)
@@ -471,8 +571,8 @@ class MessagesPage(Page):
                 self.list.setCurrentItem(item)
         self.list.blockSignals(False)
         self.select_all.blockSignals(True)
-        self.select_all.setChecked(bool(self.conversations) and len(self.checked) == len(self.conversations))
-        self.select_all.setEnabled(bool(self.conversations))
+        self.select_all.setChecked(self._all_checked())
+        self.select_all.setEnabled(True)  # the RF traffic channel is always there
         self.select_all.blockSignals(False)
         self.delete_selected_button.setEnabled(bool(self.checked))
 
@@ -487,11 +587,14 @@ class MessagesPage(Page):
             self._history_states = []
             self._history_conversation_id = ""
             return
+        is_rf = conversation.get("kind") == RF_CHANNEL_KIND
         self.delete_conversation_button.setEnabled(True)
         is_group = conversation.get("kind") == "group"
         self.thread_title.setText(str(conversation.get("callsign") or ""))
         self.group_badge.setVisible(is_group)
-        if is_group:
+        if is_rf:
+            self.thread_subtitle.setText(t("Every message heard or sent on RF (2 m, 70 cm) · read only, nothing is sent from here."))
+        elif is_group:
             self.thread_subtitle.setText(t("Group conversation · messages are sent once without ACK."))
         elif conversation.get("recently_heard"):
             self.thread_subtitle.setText(str(conversation.get("heard_recently_label") or t("Heard recently")))
@@ -523,20 +626,26 @@ class MessagesPage(Page):
         clear_layout(self.history_layout)
         self._history_last_day = ""
         if not messages:
-            empty = label(f"{conversation.get('callsign')}\n{t('No messages in this conversation yet.')}", "muted")
+            empty_text = t("No RF messages heard yet.") if is_rf else t("No messages in this conversation yet.")
+            empty = label(f"{conversation.get('callsign')}\n{empty_text}", "muted")
             empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.history_layout.addWidget(empty)
             self.history_layout.addStretch(1)
             return
         self.history_layout.addStretch(1)
-        hidden = max(0, len(messages) - self._history_limit)
+        if is_rf:  # only the newest copies are loaded; the rest stay in the database
+            hidden = max(0, int(conversation.get("total") or 0) - len(messages))
+            shown = messages
+        else:
+            hidden = max(0, len(messages) - self._history_limit)
+            shown = messages[hidden:]
         if hidden:
             # The newest messages first; a big conversation (CQ) took seconds to build in full.
             older = QPushButton(tf("Older messages ({count})", count=hidden))
             older.setProperty("variant", "secondary")
             older.clicked.connect(self._show_older_messages)
             self.history_layout.addWidget(older, 0, Qt.AlignmentFlag.AlignHCenter)
-        for message in messages[hidden:]:
+        for message in shown:
             self._add_bubble(message, conversation)
         if self._history_follow or conversation_changed:
             self._scroll_history_to_newest()
@@ -550,7 +659,10 @@ class MessagesPage(Page):
             self.history_layout.addWidget(separator)
             self._history_last_day = day
         row = QHBoxLayout()
-        bubble = MessageBubble(message, conversation, self._retry, on_mute=self._mute_sender)
+        if conversation.get("kind") == RF_CHANNEL_KIND:
+            bubble: QFrame = RfTrafficBubble(message)
+        else:
+            bubble = MessageBubble(message, conversation, self._retry, on_mute=self._mute_sender)
         if message.get("direction") == "rx":
             row.addWidget(bubble)
             row.addStretch(1)
@@ -564,6 +676,8 @@ class MessagesPage(Page):
         self._history_states = []  # rebuild with the longer window
         self._history_follow = False
         self._render_thread()
+        if self.active_id == RF_CHANNEL_ID:
+            self.loader.request()  # the older copies come from the database
         QTimer.singleShot(0, lambda: self.history_scroll.verticalScrollBar().setValue(0))
 
     def _scroll_history_to_newest(self) -> None:
@@ -591,11 +705,16 @@ class MessagesPage(Page):
         conversation = self._active()
         text = self.composer.toPlainText()
         self.composer_caption.setText(f"{t('Message text')} ({len(text)} / {self.composer_limit})")
-        self.composer.setEnabled(conversation is not None)
-        self.path_edit.setEnabled(conversation is not None)
-        self.composer.setPlaceholderText(f"{t('Type APRS message text')} ({t('Enter sends')})" if conversation
-                                         else t("Select a conversation to enable the composer"))
-        self.send_button.setEnabled(conversation is not None and bool(text.strip()) and len(text) <= self.composer_limit)
+        read_only = conversation is not None and conversation.get("kind") == RF_CHANNEL_KIND
+        writable = conversation is not None and not read_only
+        self.composer.setEnabled(writable)
+        self.path_edit.setEnabled(writable)
+        if read_only:
+            self.composer.setPlaceholderText(t("RF traffic is read only: open a conversation to write."))
+        else:
+            self.composer.setPlaceholderText(f"{t('Type APRS message text')} ({t('Enter sends')})" if conversation
+                                             else t("Select a conversation to enable the composer"))
+        self.send_button.setEnabled(writable and bool(text.strip()) and len(text) <= self.composer_limit)
 
     # --------------------------------------------------------------- actions
     def _conversation_clicked(self, item: QListWidgetItem) -> None:
@@ -609,7 +728,7 @@ class MessagesPage(Page):
         self.composer.setPlainText(self.drafts.get(self.active_id, ""))
         self.composer.blockSignals(False)
         conversation = self._active()
-        if conversation is not None:
+        if conversation is not None and conversation.get("kind") != RF_CHANNEL_KIND:
             stored = str(self.context.ui_value(f"messages/path/{normalize_callsign(conversation.get('callsign'))}", "") or "")
             self.path_edit.setText(stored or self.default_path)
         self._list_signature = ""
@@ -643,11 +762,14 @@ class MessagesPage(Page):
             self.checked.discard(str(conversation_id))
         self.delete_selected_button.setEnabled(bool(self.checked))
         self.select_all.blockSignals(True)
-        self.select_all.setChecked(bool(self.conversations) and len(self.checked) == len(self.conversations))
+        self.select_all.setChecked(self._all_checked())
         self.select_all.blockSignals(False)
 
+    def _all_checked(self) -> bool:
+        return self.checked == {str(item.get("id")) for item in self.conversations} | {RF_CHANNEL_ID}
+
     def _toggle_all(self, checked: bool) -> None:
-        self.checked = {str(item.get("id")) for item in self.conversations} if checked else set()
+        self.checked = ({str(item.get("id")) for item in self.conversations} | {RF_CHANNEL_ID}) if checked else set()
         self._list_signature = ""
         self._render_list()
 
@@ -714,7 +836,7 @@ class MessagesPage(Page):
 
     def _send(self) -> None:
         conversation = self._active()
-        if conversation is None:
+        if conversation is None or conversation.get("kind") == RF_CHANNEL_KIND:
             return
         text = normalize_message_text(self.composer.toPlainText(), self.composer_limit)
         if not text.strip():
@@ -778,9 +900,26 @@ class MessagesPage(Page):
         self.context.notify_data_changed("messages")
         self._apply(get_messages_page_data())
 
+    def _clear_rf_channel(self) -> None:
+        from app.services.rf_message_log import clear_rf_message_log
+
+        clear_rf_message_log()
+        self.rf_channel["messages"], self.rf_channel["total"] = [], 0  # the channel stays and keeps collecting
+        self._history_states = []
+
     def _delete_active(self) -> None:
         conversation = self._active()
         if conversation is None:
+            return
+        if conversation.get("kind") == RF_CHANNEL_KIND:
+            if not confirm(self, t("Clear RF traffic"), tf("This will permanently delete the {count} messages of the RF traffic "
+                                                            "channel. New ones keep coming in.", count=int(self.rf_channel["total"])),
+                           danger=True, confirm_text=t("Delete")):
+                return
+            self._clear_rf_channel()
+            self._list_signature = ""
+            self._render()
+            self.refresh()
             return
         callsign = str(conversation.get("callsign") or "")
         if not confirm(self, t("Are you sure?"), tf("This will permanently delete the conversation with {callsign} and all its messages.", callsign=callsign),
@@ -797,20 +936,30 @@ class MessagesPage(Page):
         if not self.checked:
             return
         selected = [item for item in self.conversations if str(item.get("id")) in self.checked]
+        rf_selected = RF_CHANNEL_ID in self.checked
         message_count = sum(len(item.get("messages") or []) for item in selected)
-        clear_all = len(selected) == len(self.conversations)
-        description = t("This will permanently delete all saved APRS conversations and their received and sent messages.") if clear_all \
-            else t("This will permanently delete the selected APRS conversations and their received and sent messages.")
-        summary = tf("{conversationCount} conversations · {messageCount} messages", conversationCount=len(selected), messageCount=message_count)
-        if not confirm(self, t("Clear inbox") if clear_all else t("Delete selected"), f"{description}\n\n{summary}", danger=True,
-                       confirm_text=t("Delete")):
+        clear_all = bool(selected) and len(selected) == len(self.conversations)
+        if not selected:
+            description = t("This will permanently delete the messages of the RF traffic channel. New ones keep coming in.")
+        elif clear_all:
+            description = t("This will permanently delete all saved APRS conversations and their received and sent messages.")
+        else:
+            description = t("This will permanently delete the selected APRS conversations and their received and sent messages.")
+        lines = [tf("{conversationCount} conversations · {messageCount} messages", conversationCount=len(selected),
+                    messageCount=message_count)] if selected else []
+        if rf_selected:
+            lines.append(tf("RF traffic channel: {count} messages", count=int(self.rf_channel["total"])))
+        title = t("Clear RF traffic") if not selected else (t("Clear inbox") if clear_all else t("Delete selected"))
+        if not confirm(self, title, f"{description}\n\n" + "\n".join(lines), danger=True, confirm_text=t("Delete")):
             return
         from app.services.messages import clear_message_inbox, delete_conversations, get_messages_page_data
 
         if clear_all:
             clear_message_inbox()
-        else:
-            delete_conversations([int(conversation_id) for conversation_id in self.checked])
+        elif selected:
+            delete_conversations([int(item["id"]) for item in selected])
+        if rf_selected:
+            self._clear_rf_channel()
         self.checked = set()
         self.context.notify_data_changed("messages")
         self._apply(get_messages_page_data())

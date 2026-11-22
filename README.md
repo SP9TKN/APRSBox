@@ -50,6 +50,14 @@ fictitious callsigns (<code>scripts/desktop_screenshots.py</code>).</sub></p>
   (APRS-IS never carries them).
 - **Weather history** — every weather report heard over RF, APRS-IS or CWOP kept for 7 days in metric units, with
   charts on the station card.
+- **Messages: the "RF traffic" channel** — every message frame heard or sent on RF (2 m, LoRa), each copy with its band
+  and path, telemetry and ACKs included; read only, kept for good, cleared on request like a conversation.
+- **Station search** — a callsign field on the Stations page (Enter narrows the table, together with the type filter).
+- **Traffic analyzer on the station card** — SP9DLM's analysis rules (used with his consent) over 1–96 h of APRSBox's
+  own traffic and daily logs, optionally findu.com: WIDE path, copies per frame, beacon interval, digipeater work,
+  IS→RF, who hears the station, with plain-language conclusions.
+- **Remote receiver page** — another station's APRS ANALIZER receive page (Settings → Desktop application), read every
+  minute: shown in the analyzer's "who hears it" and as an extra row in the Traffic monitor.
 - **Windows integration** — the taskbar / tray icon is your own APRS symbol, start minimised, autostart without admin
   rights, a sound for EMERGENCY / alert pop-ups, slower refreshes when nobody uses the PC.
 - **Digipeater** — frames with Polish letters and emoji are digipeated.

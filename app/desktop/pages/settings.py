@@ -257,6 +257,15 @@ class SettingsPage(Page):
         self.fast_map = checkbox(t("Fast map: keep map tiles in memory (about 130 MB more RAM)"))
         self.fast_map.setEnabled(self.manage)
         card.add(self.fast_map)
+        # Another station's receive page (SP9DLM's APRS ANALIZER) as an extra listener for the traffic analyzer.
+        remote_grid = FormGrid(1)
+        self.remote_receiver = line_edit("", placeholder="http://station.example:8080")
+        self.remote_receiver.setEnabled(self.manage)
+        remote_grid.add_field("remote_receiver", t("Remote receiver page (APRS ANALIZER)"), self.remote_receiver)
+        card.add(remote_grid)
+        card.add(label(t("APRSBox reads the page's list of heard stations every minute and keeps it; the traffic "
+                         "analyzer then shows whether that station heard a callsign, directly or through which "
+                         "digipeater. Read only. Empty = off."), "small", wrap=True))
         card.add(label(t("Off (a light app): only the tiles on the screen stay in memory, and a map that is not shown "
                          "gives its memory back. On: up to 512 tiles stay in memory, so moving and zooming back to "
                          "places seen before is instant."), "small", wrap=True))
@@ -545,6 +554,7 @@ class SettingsPage(Page):
         )
         from app.services.aprs_device_identification import get_aprs_device_identification_status
         from app.services.content import get_aprs_symbol_set, get_station_settings, has_enabled_modem_interface
+        from app.desktop.remote_receivers import remote_url
         from app.desktop.tiles import fast_map_enabled, tile_cache_limit_mb, tile_cache_size_bytes
         from app.services.cwop import get_cwop_settings, get_cwop_status
         from app.services.map_service import (
@@ -597,6 +607,7 @@ class SettingsPage(Page):
             "tile_cache_limit_mb": tile_cache_limit_mb(),
             "fast_map": fast_map_enabled(),
             "tile_cache_bytes": tile_cache_size_bytes(),
+            "remote_receiver_url": remote_url(),
         }
 
     def _apply(self, view: dict[str, Any]) -> None:
@@ -643,6 +654,7 @@ class SettingsPage(Page):
         self.autostart.setChecked(autostart.is_enabled())
         set_combo_value(self.tile_cache_limit, view.get("tile_cache_limit_mb"))
         self.fast_map.setChecked(bool(view.get("fast_map")))
+        self.remote_receiver.setText(str(view.get("remote_receiver_url") or ""))
         self._render_tile_cache_used(int(view.get("tile_cache_bytes") or 0))
         cwop = view.get("cwop") or {}
         self.cwop_enabled.setChecked(bool(cwop.get("enabled")))
@@ -814,8 +826,14 @@ class SettingsPage(Page):
         ctx.set_start_minimized(self.start_minimized.isChecked())
         ctx.set_alert_sound_enabled(self.alert_sound.isChecked())
         ctx.set_station_symbol_icon_enabled(self.station_icon.isChecked())
+        from app.desktop.remote_receivers import set_remote_url
         from app.desktop.tiles import set_fast_map, set_tile_cache_limit_mb
 
+        try:
+            self.remote_receiver.setText(set_remote_url(self.remote_receiver.text()))
+        except ValueError as exc:
+            self.desktop_flash.error(t(str(exc)))
+            return
         set_tile_cache_limit_mb(int(combo_value(self.tile_cache_limit)))  # a lower limit trims right away
         set_fast_map(self.fast_map.isChecked())  # takes effect at once
         self.context.notify_data_changed("station")  # refreshes the window and tray icon

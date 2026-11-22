@@ -294,6 +294,77 @@ def test_messages_mute_a_sender_from_a_bubble(gui: Gui, monkeypatch: Any) -> Non
     assert get_message_settings()["muted_senders"] == []
 
 
+def test_messages_rf_traffic_channel_shows_every_rf_message_read_only(gui: Gui) -> None:
+    from PySide6.QtCore import Qt
+
+    from app.desktop.pages import messages as messages_module
+    from app.desktop.pages.messages import RF_CHANNEL_ID, RfTrafficBubble
+    from app.services.outbound import persist_outbound_frame
+    from app.services.traffic import process_normalized_tnc2_rx
+
+    # Between other stations, heard on both bands, and one sent by the station's digipeater.
+    process_normalized_tnc2_rx("SP9ABC>APRS,WIDE1-1::OK0XV-5  :RF only{3", source="Test TNC", source_kind="rf", band="2m",
+                               timestamp="2026-10-09T09:00:00+00:00")
+    process_normalized_tnc2_rx("SP9ABC>APRS,SP9XDG-2*::OK0XV-5  :RF only{3", source="LORA 70CM", source_kind="rf",
+                               band="70cm", timestamp="2026-10-09T09:00:05+00:00")
+    persist_outbound_frame(source="Test TNC", band="2m", line="SP9ABC>APRS,SQ9TST*::OK0XV-5  :RF only{3")
+    page = gui.open("messages")
+    rf_item = next(page.list.item(row) for row in range(page.list.count())
+                   if page.list.item(row).data(Qt.ItemDataRole.UserRole) == RF_CHANNEL_ID)
+    assert rf_item.text() == messages_module.t("RF traffic")
+    assert rf_item.flags() & Qt.ItemFlag.ItemIsUserCheckable  # a check box like the conversations (in line with them)
+    page._conversation_clicked(rf_item)
+
+    def copies() -> list[tuple[str, ...]]:
+        return [tuple(label.text() for label in bubble.findChildren(messages_module.QLabel))[:2]
+                for bubble in page.history_host.findChildren(RfTrafficBubble) if not bubble.isHidden()]
+
+    assert gui.wait_until(lambda: copies()[-3:] == [("SP9ABC → OK0XV-5", "RF only")] * 3)  # every copy separately
+    assert not page.composer.isEnabled() and not page.send_button.isEnabled()  # read only
+    # No unread mark: the channel is not one of the conversations the inbox counter adds up.
+    assert all(str(item.get("id")) != RF_CHANNEL_ID for item in page.conversations)
+    assert page.rf_channel["unread_count"] == 0
+
+
+def test_messages_rf_traffic_channel_is_checked_and_cleared_like_a_conversation(gui: Gui, monkeypatch: Any) -> None:
+    from PySide6.QtCore import Qt
+
+    from app.desktop.pages import messages as messages_module
+    from app.desktop.pages.messages import RF_CHANNEL_ID
+    from app.services.rf_message_log import list_rf_message_log
+    from app.services.traffic import process_normalized_tnc2_rx
+
+    process_normalized_tnc2_rx("SP9ABC>APRS::OK0XV-5  :to clear{9", source="Test TNC", source_kind="rf", band="2m",
+                               timestamp="2026-10-09T09:10:00+00:00")
+    page = gui.open("messages")
+    assert gui.wait_until(lambda: page.rf_channel["total"] > 0)
+    asked: list[str] = []
+    monkeypatch.setattr(messages_module, "confirm", lambda _parent, title, *_args, **_kwargs: asked.append(title) or True)
+
+    def rf_item() -> Any:
+        return next(page.list.item(row) for row in range(page.list.count())
+                    if page.list.item(row).data(Qt.ItemDataRole.UserRole) == RF_CHANNEL_ID)
+
+    page.select_all.setChecked(True)  # "Select all" takes the channel too
+    assert RF_CHANNEL_ID in page.checked and rf_item().checkState() == Qt.CheckState.Checked
+    page.select_all.setChecked(False)
+    rf_item().setCheckState(Qt.CheckState.Checked)  # the channel alone: only it is cleared
+    conversations = len(page.conversations)
+    page._delete_selected()
+    assert asked[-1] == messages_module.t("Clear RF traffic")
+    assert list_rf_message_log(limit=10)["total"] == 0 and page.rf_channel["total"] == 0
+    assert gui.wait_until(lambda: len(page.conversations) == conversations)  # the conversations stay
+    assert rf_item() is not None  # the channel stays and keeps collecting
+    process_normalized_tnc2_rx("SP9ABC>APRS::OK0XV-5  :again{10", source="Test TNC", source_kind="rf", band="2m",
+                               timestamp="2026-10-09T09:11:00+00:00")
+    page._conversation_clicked(rf_item())
+    assert page.delete_conversation_button.isEnabled()
+    page.refresh()
+    assert gui.wait_until(lambda: page.rf_channel["total"] == 1)
+    page._delete_active()  # the bin of the channel clears it too
+    assert asked[-1] == messages_module.t("Clear RF traffic") and list_rf_message_log(limit=10)["total"] == 0
+
+
 def test_messages_enter_sends(gui: Gui) -> None:
     from PySide6.QtCore import QEvent, Qt
     from PySide6.QtGui import QKeyEvent
@@ -1012,6 +1083,98 @@ def test_station_detail_lists_the_frames_of_the_whole_retention(gui: Gui) -> Non
     assert rows > 0 and page.packets_note.isVisible()
     assert page.packets_note.text() == tf("Frames from the last {retention} (traffic history retention): {count}",
                                           retention=format_minutes(get_traffic_retention_minutes()), count=rows)
+
+
+def test_stations_search_narrows_the_table_by_callsign_on_enter(gui: Gui) -> None:
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    from app.desktop.pages.stations import station_callsign
+
+    page = gui.open("stations", seconds=1.0)
+    assert gui.wait_until(lambda: page.table.visible_count() > 3)
+    everything = page.table.visible_count()
+
+    def shown() -> list[str]:
+        model = page.table.model()
+        return [station_callsign(page.table.source.row_at(model.mapToSource(model.index(row, 0)).row()))
+                for row in range(model.rowCount())]
+
+    page.search.setText("mob")
+    assert page.table.visible_count() == everything  # typing alone changes nothing: Enter searches
+    QTest.keyClick(page.search, Qt.Key.Key_Return)
+    assert shown() == ["SP9MOB-9"]
+    page._set_filter("weather")  # together with the type filter
+    assert shown() == []
+    page.search.setText("wx")
+    QTest.keyClick(page.search, Qt.Key.Key_Return)
+    assert shown() == ["SP9XWX-13"]
+    page._set_filter("all")
+    page.search.clear()  # the clear button: all again
+    assert page.table.visible_count() == everything
+
+
+def test_station_detail_traffic_analyzer_shows_its_tables_at_the_bottom(gui: Gui) -> None:
+    from app.desktop.i18n import t
+    from app.desktop.widgets.common import Badge
+    from app.desktop.widgets.table import DataTable
+
+    page = gui.open("station-detail", "SP9MOB-9", seconds=1.5)
+    card = page.analyzer_card
+    assert not card.isVisible()
+    assert page.analyzer_button.text() == t("Traffic analyzer")
+    page.analyzer_button.click()
+    assert card.isVisible()
+    assert gui.wait_until(lambda: not card._running and bool(card.findChildren(DataTable)), timeout=20)
+    assert card.findChildren(Badge)  # the conclusions
+    bands = next(table for table in card.findChildren(DataTable) if table.model().rowCount() > 0)
+    assert bands.model().rowCount() >= 1
+    card.period_buttons[96].click()  # another period: analysed again
+    assert gui.wait_until(lambda: not card._running and "96 h" in card.status.text(), timeout=20)
+    page.open_argument("SP9XWX-13")  # another station: the old analysis goes
+    gui.pump(0.2)  # deleteLater
+    assert not card.isVisible() and not [table for table in card.findChildren(DataTable) if not table.isHidden()]
+
+
+def test_traffic_monitor_shows_the_remote_receiver_under_the_interfaces(gui: Gui) -> None:
+    import time as time_module
+
+    from app.desktop import remote_receivers
+    from app.desktop.pages.traffic import filter_frames
+
+    remote_receivers.set_remote_url("http://sp9xdg.example.net:8080")
+    try:
+        remote_receivers.store_rows("SP9XDG", [{"channel": "wx", "t": time_module.time(), "call": "SP9ABC", "path": "SR9XSR",
+                                                "wide": "WIDE1*", "dev": "Mic-E"}])
+        page = gui.open("traffic", seconds=1.0)
+        assert gui.wait_until(lambda: any(item.get("remote_key") for item in page.snapshot.get("interfaces") or []))
+        remote = [frame for frame in page.snapshot["frames"] if frame.get("remote_key")]
+        assert remote and remote[0]["line"] == "SP9ABC  ·  via SR9XSR  ·  WIDE1*  ·  Mic-E"
+        assert remote[0]["band"] == "144.800" and remote[0]["row_class"] == "traffic-log-row-remote"
+        stamps = [str(frame.get("created_at") or "") for frame in page.snapshot["frames"]]
+        assert stamps == sorted(stamps, reverse=True)  # one log, newest first
+        page._toggle_interface("remote:SP9XDG")  # the eye hides its rows like an interface
+        assert not [frame for frame in filter_frames(page.snapshot, hidden_interfaces=page.hidden_interfaces, quick_filter="",
+                                                     text_filter="") if frame.get("remote_key")]
+        page._toggle_interface("remote:SP9XDG")
+        page._open_frame(remote[0])  # no frame page behind it: nothing happens
+    finally:
+        remote_receivers.set_remote_url("")
+
+
+def test_settings_remote_receiver_page_address(gui: Gui) -> None:
+    from app.desktop.remote_receivers import remote_url, set_remote_url
+
+    page = gui.open("settings", seconds=1.0)
+    page.remote_receiver.setText(" receiver.example.net:8080/ ")
+    page._save_desktop()
+    assert remote_url() == "http://receiver.example.net:8080"
+    assert page.remote_receiver.text() == "http://receiver.example.net:8080"
+    page.remote_receiver.setText("ftp://nothing")
+    page._save_desktop()
+    assert remote_url() == "http://receiver.example.net:8080"  # refused, the error is shown
+    assert page.desktop_flash.isVisible()
+    set_remote_url("")  # the other tests run without a remote page
 
 
 def test_settings_switch_cwop_weather_stations(gui: Gui) -> None:

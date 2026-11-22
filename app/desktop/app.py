@@ -311,6 +311,12 @@ def main(argv: list[str] | None = None) -> int:
     enable_crash_log()
     init_db()
     ensure_first_run_defaults()
+    try:
+        from app.services.rf_message_log import backfill_rf_message_log
+
+        backfill_rf_message_log()  # once: the RF traffic channel starts with the frames the traffic log keeps
+    except Exception as exc:  # noqa: BLE001 - never stops the start
+        log_event("WARNING", "messages", f"RF traffic log backfill failed: {exc!r}")
     set_language(get_app_setting("app_language"))
     try:
         # The station's APRS symbol is the program icon from the first window on (like APRSIS32).
@@ -339,6 +345,10 @@ def main(argv: list[str] | None = None) -> int:
 
     traffic_log_writer = TrafficLogWriter()
     traffic_log_writer.start()
+    from app.desktop.remote_receivers import RemoteReceiverPoller
+
+    remote_receiver = RemoteReceiverPoller()  # idle until a receive page is set in Settings
+    remote_receiver.start()
     if not args.no_runtime:
         try:
             runtime.start()
@@ -369,6 +379,7 @@ def main(argv: list[str] | None = None) -> int:
         runtime.stop()
     finally:
         traffic_log_writer.stop()  # after the runtime: no frames arrive any more
+        remote_receiver.stop()
         set_active_runtime(None)
         from app.desktop.tasks import wait_for_idle
         from app.desktop.tiles import shutdown_shared_tile_manager

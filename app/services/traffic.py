@@ -258,6 +258,19 @@ def process_normalized_tnc2_rx(
                     ),
                 )
                 frame_id = int(cursor.lastrowid)
+            if normalized_kind == "rf":
+                from app.services.rf_message_log import ORIGIN_RX, record_rf_message_frame
+
+                record_rf_message_frame(
+                    connection,
+                    line=normalized_line,
+                    direction="rx",
+                    origin=ORIGIN_RX,
+                    interface_id=source_interface_id,
+                    interface_name=str(source or "").strip(),
+                    band=str(band or "").strip(),
+                    created_at=occurred_at,
+                )
             with rx_side_effect_stage(stage_collector, "alerts"):
                 alert_result = process_alert_frame(
                     connection,

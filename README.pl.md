@@ -48,6 +48,14 @@ z fikcyjnymi znakami (<code>scripts/desktop_screenshots.py</code>).</sub></p>
   (APRS-IS ich nie przenosi).
 - **Historia pogody** — każdy raport pogodowy usłyszany przez radio, APRS-IS albo CWOP trzymany 7 dni w jednostkach
   metrycznych, z wykresami na karcie stacji.
+- **Wiadomości: kanał „Ruch RF”** — każda ramka w formacie wiadomości odebrana albo nadana na radiu (2 m, LoRa), każda
+  kopia z pasmem i ścieżką, także telemetria i ACK; tylko do odczytu, trzymany na stałe, czyszczony jak rozmowa.
+- **Wyszukiwarka stacji** — pole znaku na stronie Stacje (Enter zawęża tabelę, razem z filtrem typu).
+- **Analizator ruchu na karcie stacji** — reguły analizy SP9DLM (użyte za jego zgodą) na 1–96 h własnego ruchu
+  i dziennych logów APRSBox, opcjonalnie findu.com: ścieżka WIDE, kopie ramek, co ile beacon, praca jako digi,
+  IS→RF, kto słyszy stację, z wnioskami opisanymi zwykłym językiem.
+- **Strona odbioru innej stacji** — strona odbioru APRS ANALIZER innej stacji (Ustawienia → Aplikacja desktopowa),
+  odczyt co minutę: w analizatorze („kto go słyszy”) i jako dodatkowy wiersz w Monitorze ruchu.
 - **Integracja z Windows** — ikona na pasku zadań i w zasobniku to symbol APRS Twojej stacji, start zminimalizowany,
   autostart bez uprawnień administratora, dźwięk przy oknach EMERGENCY / alarmów, rzadsze odświeżanie, gdy nikt nie
   używa komputera.

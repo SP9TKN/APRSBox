@@ -639,6 +639,39 @@ CREATE TABLE IF NOT EXISTS traffic_frames (
     created_at TEXT NOT NULL
 );
 
+-- Every message frame heard or sent on RF: the read-only "RF traffic" channel of Messages (kept for good).
+CREATE TABLE IF NOT EXISTS rf_message_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    origin TEXT NOT NULL,
+    interface_id INTEGER,
+    interface_name TEXT NOT NULL DEFAULT '',
+    band TEXT NOT NULL DEFAULT '',
+    sender TEXT NOT NULL,
+    addressee TEXT NOT NULL,
+    message_text TEXT NOT NULL,
+    message_number TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL,
+    path TEXT NOT NULL DEFAULT '',
+    relay TEXT NOT NULL DEFAULT '',
+    line TEXT NOT NULL
+);
+
+-- What another station's receive page (SP9DLM's APRS ANALIZER, /api/stats) heard: rows kept for good.
+CREATE TABLE IF NOT EXISTS remote_heard (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    receiver TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    heard_at TEXT NOT NULL,
+    call TEXT NOT NULL,
+    via TEXT NOT NULL DEFAULT '',
+    wide TEXT NOT NULL DEFAULT '',
+    device TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    UNIQUE (receiver, channel, heard_at, call, via, wide)
+);
+
 CREATE TABLE IF NOT EXISTS map_station_state (
     station_key TEXT PRIMARY KEY COLLATE NOCASE,
     snapshot_json TEXT,
@@ -1051,6 +1084,8 @@ CREATE INDEX IF NOT EXISTS idx_event_logs_created_at ON event_logs(created_at DE
 CREATE INDEX IF NOT EXISTS idx_traffic_frames_created_at ON traffic_frames(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_traffic_frames_created_id ON traffic_frames(created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_traffic_frames_format_created_at ON traffic_frames(format, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_rf_message_log_created_at ON rf_message_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_remote_heard_call ON remote_heard(call, heard_at);
 CREATE INDEX IF NOT EXISTS idx_map_station_state_revision ON map_station_state(revision);
 CREATE INDEX IF NOT EXISTS idx_map_station_state_last_heard ON map_station_state(is_deleted, last_heard_at DESC, station_key);
 CREATE INDEX IF NOT EXISTS idx_map_station_state_last_seen ON map_station_state(is_deleted, last_seen_any_at, station_key);

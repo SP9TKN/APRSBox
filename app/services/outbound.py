@@ -1133,6 +1133,20 @@ def persist_outbound_frame(
             ),
         )
         frame_id = int(cursor.lastrowid)
+        from app.services.rf_message_log import record_rf_message_frame, tx_origin
+
+        rf_origin = tx_origin(line=line, source_kind=normalized_source_kind, command=normalized_command)
+        if rf_origin is not None:
+            record_rf_message_frame(
+                connection,
+                line=line,
+                direction="tx",
+                origin=rf_origin,
+                interface_id=interface_id,
+                interface_name=source,
+                band=normalized_band,
+                created_at=occurred_at,
+            )
         if parsed is not None:
             from app.services.map_station_state import update_map_station_state_for_frame
 

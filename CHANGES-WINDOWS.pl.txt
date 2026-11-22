@@ -8,6 +8,134 @@ Wcześniejsze zmiany względem oryginału opisuje Lista-zmian.pdf.
 Najnowsze wpisy są na górze.
 
 
+2026-11-22 – Monitor ruchu: odbiór innej stacji pod interfejsami
+----------------------------------------------------------------
+
+Co jest nowe:
+  - Gdy w Ustawieniach jest adres strony odbioru innej stacji (np. SP9DLM, port 8080), Monitor
+    ruchu ma pod 70 cm, 2 m i APRS-IS wiersz tej stacji (np. „SP9DLM”, pasma „LoRa 434,855 /
+    144.800”) z okiem do pokazania/ukrycia i stanem odczytu (ostatni nowy wpis).
+  - Jej wpisy są w tym samym logu, ułożone według czasu razem z ramkami własnych interfejsów:
+    znak, wprost (RF) albo przez kogo, ścieżka WIDE, urządzenie. Własny kolor w legendzie
+    („Usłyszane przez odbiornik zdalny”). Działają filtr RX i wyszukiwanie.
+  - To nie są pełne ramki (strona podaje tylko te pola), więc wpis nie otwiera szczegółów ramki.
+
+Zmienione pliki:
+  app/desktop/remote_receivers.py       wpisy i wiersz stanu dla Monitora ruchu
+  app/desktop/pages/traffic.py          wiersz odbiornika zdalnego i jego wpisy w logu
+  app/desktop/widgets/traffic_log.py    kolor i legenda wpisów odbiornika zdalnego
+  app/services/content.py               czas ramki w migawce ruchu (do łączenia według czasu)
+  app/desktop/languages/pl.json         teksty
+  tests/test_desktop_gui.py             test Monitora ruchu z odbiornikiem zdalnym; test ptaszka
+                                        i czyszczenia kanału Ruch RF
+
+
+2026-11-22 – Analizator ruchu: odbiór innej stacji z jej strony WWW
+-------------------------------------------------------------------
+
+Co jest nowe:
+  - Ustawienia → Aplikacja desktopowa: pole „Strona odbioru innej stacji (APRS ANALIZER)”
+    (adres jej strony, zwykle port 8080). APRSBox co minutę odczytuje z niej listę usłyszanych
+    stacji (/api/stats: ostatnie 40 ramek na pasmo – czas, znak, przez kogo, ścieżka WIDE)
+    i zapisuje ją u siebie na stałe (tabela remote_heard; ta sama ramka zapisuje się raz).
+    Tylko odczyt – nic nie jest tam wysyłane. Puste pole = wyłączone.
+  - Analizator ruchu na karcie stacji pokazuje tę stację w „Kto go słyszy przez RF”, osobno
+    dla każdego jej pasma (np. „SP9DLM (144.800)”, „SP9DLM (LoRa 434,855)”): ile ramek,
+    wprost czy przez które digi, z odległością.
+  - Lista na stronie ma tylko 40 ostatnich ramek, więc przy dużym ruchu możliwe są luki
+    (analizator to zaznacza). Strona APRS ANALIZER wpuszcza naraz ograniczoną liczbę
+    oglądających spoza swojej sieci; odczyt co minutę stale zajmuje jedno z tych miejsc.
+
+Zmienione pliki:
+  app/desktop/remote_receivers.py       nowy: odczyt strony, zapis, wątek co minutę
+  app/db.py                             tabela remote_heard
+  app/desktop/app.py                    start i zatrzymanie wątku odczytu
+  app/desktop/pages/settings.py         pole adresu strony
+  app/desktop/station_analysis.py       ta stacja jako słuchacz w analizie
+  app/desktop/widgets/traffic_analyzer.py źródło „jej strona odbioru” i uwaga o lukach
+  app/desktop/languages/pl.json         teksty
+  tests/test_remote_receivers.py        nowy plik testów
+  tests/test_desktop_gui.py             test pola w Ustawieniach
+
+
+2026-11-22 – Karta stacji: analizator ruchu (reguły SP9DLM)
+-----------------------------------------------------------
+
+Co jest nowe:
+  - Na karcie stacji, obok strzałki powrotu, przycisk „Analizator ruchu”. Po kliknięciu na dole
+    karty pojawia się analiza ruchu tego znaku. Reguły analizy są autorstwa SP9DLM (jego
+    APRS ANALIZER, użyte za jego zgodą); APRSBox liczy je ze swoich danych.
+  - Okres do wyboru: 1, 6, 24, 48, 72 albo 96 h. Ramki z radia (2 m, LoRa) z tabeli ruchu
+    i dziennych logów ruchu (logs\traffic), więc dłuższe okresy działają mimo retencji 6 h.
+    Ramki z APRS-IS tylko z tabeli ruchu (czas retencji).
+  - Opcjonalnie findu.com (archiwum całego APRS-IS): bramki, które słyszą stację poza naszym
+    zasięgiem, jej pozycje i wiadomości. Wolniejsze; gdy findu.com nie odpowiada, analiza
+    pokazuje resztę.
+  - Wnioski (OK / uwaga / problem): za długa ścieżka WIDE lub przestarzałe aliasy, każda ramka
+    słyszana wiele razy, za częsty beacon stacji stałej, podwójne powtórki przez digi, ramki
+    z internetu nadawane na RF, ramki wysyłane przez internet (TCPIP).
+  - Tabele: ruch generowany przez znak (nadania, kopie, rodzaje, co ile beacon i telemetria,
+    przez które digi), ścieżka WIDE, praca jako digi, kto go słyszy przez RF (z odległością),
+    APRS-IS, IS→RF, wiadomości, ostatnie ramki.
+
+Zmienione pliki:
+  app/desktop/station_analysis.py        nowy: analiza (reguły SP9DLM na danych APRSBox)
+  app/desktop/widgets/traffic_analyzer.py nowy: karta analizatora z okresami i tabelami
+  app/desktop/pages/station_detail.py    przycisk „Analizator ruchu” i karta na dole
+  app/desktop/languages/pl.json          teksty
+  tests/test_station_analysis.py         nowy plik testów
+  tests/test_desktop_gui.py              test: przycisk, tabele, zmiana okresu i stacji
+  tests/conftest.py                      w testach findu.com jest wyłączone (bez internetu)
+
+
+2026-11-22 – Stacje: wyszukiwarka znaku
+---------------------------------------
+
+Co jest nowe:
+  - W nagłówku strony Stacje, na prawo od tytułu, pole z lupą. Enter zostawia w tabeli stacje,
+    których znak zawiera wpisany tekst (np. „DLM” → SP9DLM, SP9DLM-2), razem z filtrem typu.
+    Puste pole (Enter albo krzyżyk w polu) pokazuje znowu wszystkie.
+
+Zmienione pliki:
+  app/desktop/pages/stations.py      pole wyszukiwania
+  app/desktop/languages/pl.json      tekst „Szukaj znaku”
+  tests/test_desktop_gui.py          test wyszukiwarki
+
+
+2026-11-22 – Wiadomości: nowy kanał „Ruch RF”
+---------------------------------------------
+
+Co było nie tak:
+  - Moduł Wiadomości pokazuje tylko wiadomości do własnej stacji i do grup (ALL, QST, CQ).
+    Wiadomości między innymi stacjami, potwierdzenia ACK i telemetria usłyszane na radiu były
+    widoczne tylko w zakładce Ruch, a ta trzyma ramki tylko przez czas retencji (u SP9TKN 6 h).
+
+Co jest teraz:
+  - Na górze listy rozmów jest kanał „Ruch RF”: każda ramka w formacie wiadomości odebrana
+    albo nadana na radiu (2 m i LoRa 70 cm). Także telemetria PARM/UNIT/EQNS/BITS, ACK/REJ,
+    wiadomości do własnej stacji i do grup, biuletyny i zapytania.
+  - Każda kopia osobno: z godziną, pasmem, ścieżką i oznaczeniem, skąd się wzięła (odebrana,
+    nadana przez stację, powtórzona przez digi, z APRS-IS na RF). Wiadomość z internetu nadana
+    na radio przez cudzy iGate ma nadawcę i adresata z jej wnętrza oraz znak tego iGate'a.
+  - Kanał jest tylko do odczytu: nic stąd nie jest wysyłane ani potwierdzane, nie ma licznika
+    nieprzeczytanych ani powiadomień. Ma ptaszek jak rozmowy (także „Zaznacz wszystkie”):
+    „Usuń zaznaczone” albo kosz przy kanale czyści jego wiadomości (z pytaniem), a sam kanał
+    zostaje i dalej zbiera nowe.
+  - Zapis na stałe (osobna tabela rf_message_log, poza retencją ruchu). Przy pierwszym starcie
+    kanał dostaje wiadomości, które są jeszcze w zakładce Ruch.
+
+Zmienione pliki:
+  app/services/rf_message_log.py      nowy: rozpoznawanie, zapis i odczyt kopii wiadomości z RF
+  app/db.py                           tabela rf_message_log
+  app/services/traffic.py             zapis każdej odebranej ramki z RF
+  app/services/outbound.py            zapis każdej nadanej ramki na RF (bez TX-SKIP i APRS-IS)
+  app/desktop/app.py                  jednorazowe uzupełnienie kanału z zakładki Ruch przy starcie
+  app/desktop/pages/messages.py       kanał „Ruch RF” na liście rozmów, dymki z pasmem i ścieżką
+  app/desktop/languages/pl.json       nowe teksty
+  tests/test_rf_message_log.py        nowy plik testów
+  tests/test_desktop_gui.py           test: kanał pokazuje każdą kopię, tylko do odczytu
+
+
 2026-10-30 – Testy nie zmieniają już autostartu Windows
 -------------------------------------------------------
 
