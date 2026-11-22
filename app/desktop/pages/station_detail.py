@@ -176,7 +176,8 @@ class StationDetailPage(Page):
         self.ssids_layout = FlowLayout(self.ssids_host, spacing=6)
         self.ssids_card.add(self.ssids_host)
         self.body.addWidget(self.ssids_card)
-        self.analyzer_card = TrafficAnalyzerCard(on_shown=self._scroll_to_analyzer)
+        self.analyzer_card = TrafficAnalyzerCard(on_shown=self._scroll_to_analyzer, context=self.context,
+                                                 on_open_station=lambda callsign: self.navigate("station-detail", callsign))
         self.body.addWidget(self.analyzer_card)
         self.body.addStretch(1)
         self.loader = SerialLoader(self._load, self._apply, self)

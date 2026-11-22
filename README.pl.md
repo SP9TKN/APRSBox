@@ -56,6 +56,10 @@ z fikcyjnymi znakami (<code>scripts/desktop_screenshots.py</code>).</sub></p>
   IS→RF, kto słyszy stację, z wnioskami opisanymi zwykłym językiem.
 - **Strona odbioru innej stacji** — strona odbioru APRS ANALIZER innej stacji (Ustawienia → Aplikacja desktopowa),
   odczyt co minutę: w analizatorze („kto go słyszy”) i jako dodatkowy wiersz w Monitorze ruchu.
+- **Mapa tras w analizatorze ruchu** — kto kogo usłyszał, na mapie APRSBox: strzałki między stacjami po ścieżkach
+  ramek, tym grubsze, im więcej ramek w okresie (1–96 h). Warstwy do włączania: ramki stacji do odbiorników (nasz
+  i strona odbioru innej stacji), iGate'y, które wysłały je do APRS-IS, czyje ramki powtarza, a na karcie własnej
+  stacji cała sieć słyszana przez RF. Pomysł za mapą analizy bramki SP9DLM.
 - **Integracja z Windows** — ikona na pasku zadań i w zasobniku to symbol APRS Twojej stacji, start zminimalizowany,
   autostart bez uprawnień administratora, dźwięk przy oknach EMERGENCY / alarmów, rzadsze odświeżanie, gdy nikt nie
   używa komputera.

@@ -8,6 +8,42 @@ Wcześniejsze zmiany względem oryginału opisuje Lista-zmian.pdf.
 Najnowsze wpisy są na górze.
 
 
+2026-11-22 – Analizator ruchu: mapa tras („kto kogo usłyszał”)
+--------------------------------------------------------------
+
+Co jest nowe:
+  - Analizator ruchu na karcie stacji ma sekcję „Mapa tras” (pod „Kto go słyszy przez RF”):
+    mapa APRSBox (te same podkłady, zoom, przeciąganie) ze strzałkami między stacjami.
+    Strzałka A → B: B usłyszał nadawanie A; im grubsza, tym więcej ramek w wybranym okresie
+    (1–96 h, starsze z dziennych logów ruchu). Pomysł: mapa na stronie analizy bramki SP9DLM.
+  - Warstwy do włączania/wyłączania:
+      • Jego ramki do odbiorników – trasy jego ramek: przez które digi doszły do nas
+        i do strony odbioru innej stacji (np. SP9DLM),
+      • iGate'y (APRS-IS) – bramki, które wysłały jego ramki do APRS-IS (linia przerywana),
+      • Czyje ramki powtarza – gdy stacja jest digi: od kogo są ramki, które powtórzyła,
+      • Cała sieć – tylko na karcie naszej stacji: wszystko, co słyszymy przez RF
+        (wszystkie stacje i wszystkie przeskoki digi do nas, oba pasma).
+  - Kolory jak na mapie głównej: skok do odbiornika, skok do digi, APRS-IS; ramki powtórzone
+    osobnym kolorem. Przeskok przez digi bez znaku (sam WIDEn-N) albo przez stację bez znanej
+    pozycji jest łączony linią przerywaną. Stacje bez pozycji są wypisane pod mapą.
+  - Najechanie na strzałkę: kto kogo usłyszał, ile ramek (z podziałem na pasma), kiedy ostatnio.
+    Dwuklik na stacji otwiera jej kartę.
+  - Pierwszy widok obejmuje stacje do 250 km od analizowanej; dalsze (np. ramki z internetu
+    nadane na RF z oryginalną ścieżką) są narysowane, widać je po oddaleniu.
+  - Mapa ma pełną szerokość karty, a jej wysokość to 4/5 szerokości (szerokość : wysokość = 5 : 4).
+
+Zmienione pliki:
+  app/desktop/station_analysis.py       trasy ramek (warstwy, liczniki, pozycje), ruch RF całej sieci
+  app/desktop/widgets/route_map.py      nowy: mapa tras z przełącznikami warstw i legendą
+  app/desktop/widgets/traffic_analyzer.py  sekcja „Mapa tras”
+  app/desktop/widgets/map_view.py       strzałka może stać poza środkiem odcinka (A→B i B→A
+                                        nie zasłaniają się)
+  app/desktop/pages/station_detail.py   mapa analizatora: przyciemnienie mapy, dwuklik = karta stacji
+  app/desktop/languages/pl.json         teksty
+  tests/test_station_analysis.py        testy tras (zwykła stacja, nasza stacja z całą siecią)
+  tests/test_desktop_widgets.py         test mapy tras (warstwy, grubość, dwuklik)
+
+
 2026-11-22 – Monitor ruchu: odbiór innej stacji pod interfejsami
 ----------------------------------------------------------------
 

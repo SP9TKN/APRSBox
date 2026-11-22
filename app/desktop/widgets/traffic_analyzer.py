@@ -50,12 +50,16 @@ def table(columns: list[Column], rows: list[dict[str, Any]], visible_rows: int =
 class TrafficAnalyzerCard(Card):
     """Hidden until the station page's "Traffic analyzer" button; a period and findu.com can be chosen."""
 
-    def __init__(self, parent: QWidget | None = None, *, on_shown: Callable[[], None] | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, *, on_shown: Callable[[], None] | None = None,
+                 context: Any = None, on_open_station: Callable[[str], None] | None = None) -> None:
         super().__init__(t("Traffic analyzer"), t("Analysis rules: SP9DLM (APRS ANALIZER)."), parent=parent)
         self.callsign = ""
         self.hours = DEFAULT_HOURS
         self._running = False
         self._on_shown = on_shown
+        self._context = context  # the map's darkening / lightening setting
+        self._on_open_station = on_open_station
+        self.route_map_panel: Any = None
         controls = QHBoxLayout()
         controls.addWidget(label(t("Period"), "muted"))
         self.period_group = QButtonGroup(self)
@@ -99,6 +103,7 @@ class TrafficAnalyzerCard(Card):
     def reset(self) -> None:
         """Another station was opened: the old result goes."""
         self.callsign = ""
+        self.route_map_panel = None
         clear_layout(self.results)
         self.status.setText("")
         self.setVisible(False)
@@ -151,6 +156,7 @@ class TrafficAnalyzerCard(Card):
             self.results.addWidget(widget)
 
     def render(self, result: dict[str, Any]) -> None:
+        self.route_map_panel = None
         clear_layout(self.results)
         self.status.setText(tf("{callsign}: the last {hours} h, analysed {time}. RF from the traffic logs, APRS-IS since {aprsis}.",
                                callsign=result.get("call"), hours=result.get("hours"), time=when(result.get("now")),
@@ -222,6 +228,15 @@ class TrafficAnalyzerCard(Card):
         for name in result.get("remote_receivers") or []:
             self.results.addWidget(label(tf("{name}: from its receive page (the last 40 rows, read every minute; gaps are "
                                             "possible).", name=name), "small", wrap=True))
+
+        route_map = result.get("route_map") or {}
+        if route_map.get("edges"):
+            from app.desktop.widgets.route_map import RouteMapPanel
+
+            self.route_map_panel = RouteMapPanel(route_map, context=self._context, on_open_station=self._on_open_station)
+            self._section(t("Route map"), self.route_map_panel)
+        else:
+            self._section(t("Route map"), None, t("No route between stations with a known position in the period."))
 
         aprsis = result.get("aprsis") or {}
         fu = result.get("findu") or {}

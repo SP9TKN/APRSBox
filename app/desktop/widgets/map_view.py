@@ -93,6 +93,7 @@ class MapPolyline:
     point_tooltips: list[str] | None = None  # one per point: hovering a dot shows it
     point_payloads: list[Any] | None = None  # one per point: sent on a right click
     arrows: bool = False  # direction arrow in the middle of every segment
+    arrow_at: float = 0.5  # where on a segment the arrow sits (0.5 = the middle; more = nearer its end)
 
 
 @dataclass(slots=True)
@@ -616,7 +617,7 @@ class MapView(QWidget):
                 length = math.hypot(dx, dy)
                 if length >= size * 4:  # no arrow on a segment shorter than a few arrows
                     ux, uy = dx / length, dy / length
-                    tip = QPointF(previous.x() + dx / 2 + ux * size, previous.y() + dy / 2 + uy * size)
+                    tip = QPointF(previous.x() + dx * shape.arrow_at + ux * size, previous.y() + dy * shape.arrow_at + uy * size)
                     back = QPointF(tip.x() - ux * size * 2, tip.y() - uy * size * 2)
                     painter.drawPolygon(QPolygonF([
                         tip,

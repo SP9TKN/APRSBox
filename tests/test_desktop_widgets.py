@@ -849,3 +849,43 @@ def test_station_info_on_a_click_and_the_station_page_on_a_double_click(qapp, mo
         view._show_tooltip(QPoint(10, 10), "<b>3</b>")
     assert calls == [("show", "<b>3</b>", -1)]
     view.deleteLater()
+
+
+def test_route_map_panel_draws_layers_that_can_be_switched(qapp) -> None:
+    from app.desktop.widgets.route_map import RouteMapPanel, edge_width
+
+    opened = []
+    nodes = {call: {"call": call, "lat": lat, "lon": lon, "station": None}
+             for call, lat, lon in (("SP9TKN", 50.09, 19.68), ("SR9XSR", 50.02, 19.15), ("SP9ABC", 50.1, 18.5),
+                                    ("SP9XYZ", 50.17, 18.83))}
+    edges = [
+        {"layer": "network", "a": "SR9XSR", "b": "SP9TKN", "n": 40, "uncertain": False, "direct": True, "bands": {"APRS 2M": 40}, "last": 0},
+        {"layer": "digi", "a": "SP9XYZ", "b": "SP9TKN", "n": 3, "uncertain": False, "direct": False, "bands": {}, "last": 0},
+        {"layer": "own", "a": "SP9TKN", "b": "SR9XSR", "n": 1, "uncertain": True, "direct": False, "bands": {}, "last": 0},
+    ]
+    route_map = {"focus": "SP9TKN", "own": "SP9TKN", "receivers": ["SP9TKN"], "nodes": nodes, "edges": edges,
+                 "missing": ["SQ9NOPOS"], "layers": {"network": 1, "digi": 1, "aprsis": 0, "own": 1}}
+    panel = RouteMapPanel(route_map, on_open_station=opened.append)
+    assert set(panel.layer_checks) == {"own", "digi", "network"}  # no APRS-IS switch without its arrows
+    panel.resize(1000, 1400)
+    panel.show()
+    for _ in range(5):
+        qapp.processEvents()
+    width = panel.view.width()
+    assert width > 900 and panel.view.height() == round(width * 4 / 5)  # the card's width, height = 4/5 of it
+    panel.resize(1200, 1600)
+    for _ in range(5):
+        qapp.processEvents()
+    assert panel.view.width() > width and panel.view.height() == round(panel.view.width() * 4 / 5)
+    shapes = panel.view.layers["paths"]
+    assert len(shapes) == 3 and all(shape.arrows and shape.arrow_at > 0.5 for shape in shapes)
+    assert shapes[0].width > shapes[1].width  # 40 frames draw a thicker arrow than 3
+    assert shapes[2].dashed  # bridged hop
+    assert {marker.key for marker in panel.view.markers} == {"SP9TKN", "SR9XSR", "SP9XYZ"}
+    panel.layer_checks["network"].setChecked(False)
+    assert len(panel.view.layers["paths"]) == 2
+    panel.layer_checks["digi"].setChecked(False)
+    assert {marker.key for marker in panel.view.markers} == {"SP9TKN", "SR9XSR"}
+    panel._open({"display_callsign": "SR9XSR"})  # double click on a station
+    assert opened == ["SR9XSR"]
+    assert edge_width(0) < edge_width(10) < edge_width(10_000) == 7.0

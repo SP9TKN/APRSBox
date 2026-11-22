@@ -58,6 +58,10 @@ fictitious callsigns (<code>scripts/desktop_screenshots.py</code>).</sub></p>
   IS→RF, who hears the station, with plain-language conclusions.
 - **Remote receiver page** — another station's APRS ANALIZER receive page (Settings → Desktop application), read every
   minute: shown in the analyzer's "who hears it" and as an extra row in the Traffic monitor.
+- **Route map in the traffic analyzer** — who heard whom, drawn on the APRSBox map: arrows between the stations along
+  the frames' paths, as thick as the number of frames in the period (1–96 h). Switchable layers: the station's frames
+  to the receivers (ours and a remote receive page), the iGates that put them into APRS-IS, whose frames it repeats,
+  and — on the own station's card — the whole network we hear on RF. Idea after SP9DLM's gateway analysis map.
 - **Windows integration** — the taskbar / tray icon is your own APRS symbol, start minimised, autostart without admin
   rights, a sound for EMERGENCY / alert pop-ups, slower refreshes when nobody uses the PC.
 - **Digipeater** — frames with Polish letters and emoji are digipeated.

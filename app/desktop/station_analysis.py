@@ -25,6 +25,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from app.desktop.rf_paths import path_hops as rf_hops
+from app.desktop.rf_paths import route_from_frame, strip_zero_ssid
+
 PERIOD_HOURS = (1, 6, 24, 48, 72, 96)
 NEAR_INFRA_KM = 50  # "dense area": gateways/digipeaters within this radius
 REGIONAL_DIGIS = {"SP9DLM": "regional digipeater"}  # wide coverage, WIDE2-2 intended (SP9DLM, 2026-11-17)
@@ -37,6 +40,14 @@ ALIAS_RE = re.compile(r"^(WIDE|TRACE|RELAY|ECHO|GATE|NI|NF|KB|SP|HOP|TCPIP|TCPXX
 WIDE_RE = re.compile(r"^(WIDE|TRACE)([1-7])-([0-7])$")
 LOG_LINE_RE = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) (TX-REMOTE|RX|TX)\s+(.*)$")
 APRSIS = "APRS-IS"
+# Route map layers (the user's choice, 2026-11-22, after SP9DLM's "remote gateway analysis" map).
+MAP_OWN = "own"  # its frames -> the receivers that heard them on RF (ours, a remote receive page)
+MAP_APRSIS = "aprsis"  # its frames -> the iGates that put them into APRS-IS (findu.com too)
+MAP_DIGI = "digi"  # the frames it repeated: their senders -> it
+MAP_NETWORK = "network"  # the own station only: everything we heard on RF
+MAP_LAYERS = (MAP_NETWORK, MAP_DIGI, MAP_APRSIS, MAP_OWN)  # drawing order: the station's own routes on top
+NETWORK_ROW_LIMIT = 300_000
+POSITION_FIRST = "!=/@`'"  # frames of a station that carry its own position (objects carry another one)
 
 
 def norm_call(value: Any) -> str | None:
@@ -225,6 +236,130 @@ def _read_log(path: Path, interface: str, base: str, since: float, until: float)
     return out
 
 
+def collect_rf_rx(*, since: float, now: float, limit: int = NETWORK_ROW_LIMIT) -> list[tuple[float, str, str]]:
+    """Every frame our RF interfaces received since ``since``: (ts, interface name, TNC2 line), oldest first.
+
+    For the own station's network map. Same sources as ``collect_frames``, without the callsign filter.
+    """
+    from app.db import fetch_all, traffic_retention_cutoff
+    from app.desktop.traffic_logs import interface_log_dir
+
+    retention_from = _ts(traffic_retention_cutoff()) or now
+    interfaces = _rf_interfaces()
+    rows: list[tuple[float, str, str]] = []
+    for row in fetch_all(
+        """
+        SELECT created_at, interface_id, line
+        FROM traffic_frames
+        WHERE created_at >= ? AND direction = 'rx' AND source_kind <> 'aprsis'
+        ORDER BY id
+        """,
+        (_iso(max(since, retention_from)),),
+    ):
+        ts = _ts(row["created_at"])
+        interface = interfaces.get(int(row["interface_id"])) if row["interface_id"] is not None else None
+        if ts is None or ts < since or interface is None:
+            continue
+        rows.append((ts, interface["name"], _tnc2(row["line"])))
+    if since < retention_from:
+        for interface_id, interface in interfaces.items():
+            folder = interface_log_dir(interface["name"], interface_id)
+            day = datetime.fromtimestamp(since, timezone.utc).date()
+            last_day = datetime.fromtimestamp(retention_from, timezone.utc).date()
+            while day <= last_day:
+                for ts, name, direction, line in _read_log(folder / f"{day.isoformat()}.log", interface["name"], "",
+                                                           since, retention_from):
+                    if direction == "R":
+                        rows.append((ts, name, line))
+                day += timedelta(days=1)
+    rows.sort(key=lambda item: item[0])
+    return rows[-limit:]
+
+
+# ---------------------------------------------------------------------------------------- route map
+class RouteMap:
+    """Frame routes ("who heard whom") counted per chain; positions are resolved at the end.
+
+    A chain is ``sender -> digipeater ... -> receiver``; ``None`` is a hop through an unknown digipeater
+    (a generic alias without a callsign before it). An edge ``a -> b`` means: b heard a's transmission.
+    """
+
+    def __init__(self) -> None:
+        self.chains: dict[tuple[str, tuple[str | None, ...]], dict[str, Any]] = {}
+        self.receivers: dict[str, set[str]] = collections.defaultdict(set)
+
+    def add(self, layer: str, chain: list[str | None], *, band: str = "", ts: float = 0.0) -> None:
+        cleaned: list[str | None] = []
+        for node in chain:
+            node = strip_zero_ssid(node) if node is not None else None
+            if node is not None and cleaned and cleaned[-1] == node:
+                continue  # a receiver that also is the last digipeater, SR9SRC*,SR9SRC ...
+            cleaned.append(node)
+        if len(cleaned) < 2 or not cleaned[0] or cleaned[-1] is None:
+            return
+        entry = self.chains.setdefault((layer, tuple(cleaned)), {"n": 0, "bands": collections.Counter(), "last": 0.0})
+        entry["n"] += 1
+        if band:
+            entry["bands"][band] += 1
+        entry["last"] = max(entry["last"], ts)
+
+    def calls(self) -> set[str]:
+        return {node for (_layer, chain) in self.chains for node in chain if node}
+
+    def edges(self, positions: dict[str, tuple[float, float]]) -> tuple[list[dict[str, Any]], list[str]]:
+        """Edges between stations with a known position, and the stations left out for lack of one.
+
+        A hop through an unknown digipeater or a station without a position is bridged: the edge over it is
+        ``uncertain`` (drawn dashed) unless another chain gives the same edge without a gap.
+        """
+        merged: dict[tuple[str, str, str], dict[str, Any]] = {}
+        missing: set[str] = set()
+        for (layer, chain), entry in self.chains.items():
+            current: str | None = None
+            gap = False
+            for node in chain:
+                if node is None or node not in positions:
+                    if node is not None:
+                        missing.add(node)
+                    gap = current is not None  # nothing bridged before the first station with a position
+                    continue
+                if current is not None and positions[node] != positions[current]:
+                    key = (layer, current, node)
+                    edge = merged.get(key)
+                    if edge is None:
+                        edge = merged[key] = {"layer": layer, "a": current, "b": node, "n": 0, "uncertain": True,
+                                              "bands": collections.Counter(), "last": 0.0}
+                    edge["n"] += entry["n"]
+                    edge["uncertain"] = edge["uncertain"] and gap
+                    edge["bands"].update(entry["bands"])
+                    edge["last"] = max(edge["last"], entry["last"])
+                current, gap = node, False
+        edges = []
+        for edge in merged.values():
+            edge["bands"] = dict(edge["bands"])
+            edge["direct"] = edge["b"] in self.receivers.get(edge["layer"], set())
+            edges.append(edge)
+        edges.sort(key=lambda edge: (MAP_LAYERS.index(edge["layer"]), edge["n"]))
+        return edges, sorted(missing)
+
+
+def _digi_chain(source: str, hops: list[str], call: str) -> list[str | None]:
+    """A frame ``call`` repeated: its sender and the hops up to ``call``."""
+    sender = strip_zero_ssid(source)
+    path = rf_hops(hops, sender)
+    target = strip_zero_ssid(call)
+    if target in path:
+        return [sender, *path[:path.index(target) + 1]]
+    return [sender, target]
+
+
+def _remote_hops(via: str) -> list[str]:
+    """The digipeaters a remote receive page names ("SR9SRC" or "OK0EK-3, OK0BDL-1"; "RF" = directly)."""
+    if via in ("", "RF"):
+        return []
+    return [f"{part.strip()}*" for part in via.split(",") if part.strip()]
+
+
 # ------------------------------------------------------------------------------------------ findu
 def _fetch(url: str) -> str:
     request = urllib.request.Request(url, headers={"User-Agent": "APRSBox-analyzer/1.0"})
@@ -284,19 +419,33 @@ def findu(call: str, now: float, window: float) -> dict[str, Any]:
 
 # ---------------------------------------------------------------------------------------- positions
 def _known_positions() -> dict[str, tuple[float, float]]:
+    return _known_stations()[0]
+
+
+def _known_stations() -> tuple[dict[str, tuple[float, float]], dict[str, dict[str, Any]]]:
+    """Positions by callsign and the map's station entries by callsign (symbol, tooltip data for the route map)."""
     from app.desktop.map_layers import station_positions
     from app.services.content import get_station_settings
     from app.services.map_station_state import read_map_station_state
 
     station_settings = get_station_settings(include_tx_runtime=False)
-    positions = {key.upper(): value for key, value in station_positions(read_map_station_state(station_settings=station_settings)["snapshots"]).items()}
+    snapshots = read_map_station_state(station_settings=station_settings)["snapshots"]
+    positions = {key.upper(): value for key, value in station_positions(snapshots).items()}
+    stations: dict[str, dict[str, Any]] = {}
+    for station in snapshots:
+        for key in (station.get("display_callsign"), station.get("callsign")):
+            text = str(key or "").strip().upper()
+            if text:
+                stations.setdefault(text, station)
+                if text.endswith("-0"):
+                    stations.setdefault(text[:-2], station)
     own = _own_identity(station_settings)
     try:
         if own:
             positions[own] = (float(station_settings["latitude"]), float(station_settings["longitude"]))
     except (KeyError, TypeError, ValueError):
         pass
-    return positions
+    return positions, stations
 
 
 def _own_identity(station_settings: dict[str, Any] | None = None) -> str:
@@ -329,6 +478,32 @@ def _findu_position(call: str) -> tuple[float, float] | None:
     return found
 
 
+def _route_map_payload(route_map: RouteMap, *, call: str, own: str, me: tuple[float, float] | None,
+                       known: dict[str, tuple[float, float]], known_stations: dict[str, dict[str, Any]],
+                       position_frames: dict[str, str]) -> dict[str, Any]:
+    """Edges and the stations at their ends, for the analyzer's map."""
+    positions = dict(known)
+    if me:
+        positions[call] = me
+    for node in route_map.calls():
+        if node not in positions and node in position_frames:
+            position = _position_of_frame(position_frames[node])
+            if position:
+                positions[node] = position
+    edges, missing = route_map.edges(positions)
+    nodes: dict[str, dict[str, Any]] = {}
+    for edge in edges:
+        for node in (edge["a"], edge["b"]):
+            if node not in nodes:
+                nodes[node] = {"call": node, "lat": positions[node][0], "lon": positions[node][1],
+                               "station": known_stations.get(node)}
+    if call in positions and call not in nodes:
+        nodes[call] = {"call": call, "lat": positions[call][0], "lon": positions[call][1], "station": known_stations.get(call)}
+    receivers = sorted(set().union(*route_map.receivers.values())) if route_map.receivers else []
+    return {"focus": call, "own": own, "receivers": receivers, "nodes": nodes, "edges": edges, "missing": missing,
+            "layers": {layer: sum(1 for edge in edges if edge["layer"] == layer) for layer in MAP_LAYERS}}
+
+
 # ----------------------------------------------------------------------------------------- analysis
 def analyze_station(call: str, *, hours: int = 24, use_findu: bool = False) -> dict[str, Any]:
     call = norm_call(call) or ""
@@ -345,11 +520,15 @@ def analyze_station(call: str, *, hours: int = 24, use_findu: bool = False) -> d
     aprsis_own: list[tuple] = []
     aprsis_igate: list[tuple] = []
     positions: list[tuple[float, float]] = []
+    route_map = RouteMap()
+    position_frames: dict[str, str] = {}  # the newest frame of a station with its own position (route map)
     for ts, interface, direction, frame in collected["rows"]:
         parts = split_frame(frame)
         if not parts:
             continue
         source, dest, hops, info = parts
+        if info[:1] in POSITION_FIRST:
+            position_frames[strip_zero_ssid(source.upper())] = frame
         if interface == APRSIS:
             path, q, igate = rf_path(hops)
             if source.upper() == call:
@@ -385,7 +564,7 @@ def analyze_station(call: str, *, hours: int = 24, use_findu: bool = False) -> d
         elif (direction == "T" and own_station == call) or call in [hop.upper() for hop in used_hops(hops)]:
             band["digi"].append((ts, source, hops, info, sender_of_copy))
 
-    known = _known_positions()
+    known, known_stations = _known_stations()
     me = positions[-1] if positions else known.get(call)
     result: dict[str, Any] = {"call": call, "hours": hours, "now": now, "from": now - window,
                               "aprsis_from": max(now - window, collected["retention_from"]), "bands": {}}
@@ -440,6 +619,7 @@ def analyze_station(call: str, *, hours: int = 24, use_findu: bool = False) -> d
             last_digi[key] = {"t": ts, "tx": 1 if mine else 0}
             repeated.append(ts)
             sources[source] += 1
+            route_map.add(MAP_DIGI, _digi_chain(source.upper(), hops, call), band=name, ts=ts)
             used = [hop.upper() for hop in used_hops(hops)]
             if not used or used[0] == call:
                 first_hop += 1
@@ -513,10 +693,13 @@ def analyze_station(call: str, *, hours: int = 24, use_findu: bool = False) -> d
             entry["via"]["?"] += 1
 
     receiver = own_station or "APRSBox"
+    route_map.receivers[MAP_OWN].add(receiver)
+    route_map.receivers[MAP_NETWORK].add(receiver)
     # Our own receivers by interface name (2 m, LoRa): they sit at the own station's position.
     for name, band in bands.items():
         for ts, _interface, hops, _info in band["rx"]:
             note(name, ts, hops, "rx")
+            route_map.add(MAP_OWN, [call, *rf_hops(hops, call), receiver], band=name, ts=ts)
         if name in hear:
             hear[name]["ours"] = True
     # Another station's receive page (Settings -> Desktop application): its rows say via whom it heard the call.
@@ -529,16 +712,22 @@ def analyze_station(call: str, *, hours: int = 24, use_findu: bool = False) -> d
         note(name, _ts(row["heard_at"]) or now, [] if via in ("", "RF") else [f"{via}*"], "remote")
         hear[name]["remote"] = row["receiver"]
         remote_names.add(row["receiver"])
+        remote_call = str(row["receiver"] or "").upper()
+        route_map.receivers[MAP_OWN].add(strip_zero_ssid(remote_call))
+        route_map.add(MAP_OWN, [call, *rf_hops(_remote_hops(via), call), remote_call],
+                      band=f"{row['receiver']} {CHANNEL_NAMES.get(row['channel'], row['channel'])}", ts=_ts(row["heard_at"]) or now)
     result["remote_receivers"] = sorted(remote_names)
     local = []
     for ts, _dest, path, q, igate, info in aprsis_own:
         if q in ("qAR", "qAO", "qAo") and igate and igate.upper() != receiver:
             note(igate.upper(), ts, path, "aprsis")
             local.append((igate.upper(), info, ts))
+            route_map.add(MAP_APRSIS, [call, *rf_hops(path, call), igate.upper()], band=APRSIS, ts=ts)
     for ts, path, igate, info in found.get("raw") or []:
         if igate.upper() == receiver or any(item[0] == igate.upper() and item[1] == info and abs(item[2] - ts) <= 90 for item in local):
             continue
         note(igate.upper(), ts, path, "findu")
+        route_map.add(MAP_APRSIS, [call, *rf_hops(path, call), igate.upper()], band="findu.com", ts=ts)
     hearers = sorted(hear.values(), key=lambda entry: entry["n"], reverse=True)[:25]
     via_all = set(v for entry in hearers for v in entry["via"] if v != "?")
     for band in bands.values():
@@ -563,6 +752,19 @@ def analyze_station(call: str, *, hours: int = 24, use_findu: bool = False) -> d
     result["hearers"] = hearers
     infra = (hearer_calls | via_all) - {call}
     result["infra_near"] = sorted(c for c in infra if c in known and me and dist_km(me[0], me[1], known[c][0], known[c][1]) <= NEAR_INFRA_KM)
+
+    # Route map: the own station's analysis also draws everything we heard on RF (like SP9DLM's gateway map).
+    if own_station and call == own_station:
+        for ts, interface, line in collect_rf_rx(since=now - window, now=now):
+            route = route_from_frame(line, source_kind="rf", own_callsign=own_station)
+            if route is None:
+                continue  # our own frames heard back (in the "its frames" layer), third-party frames
+            route_map.add(MAP_NETWORK, [route.station, *route.hops, own_station], band=interface, ts=ts)
+            info = line.split(":", 1)[1] if ":" in line else ""
+            if info[:1] in POSITION_FIRST:
+                position_frames[route.station] = line
+    result["route_map"] = _route_map_payload(route_map, call=call, own=own_station, me=me, known=known,
+                                             known_stations=known_stations, position_frames=position_frames)
 
     # WIDE settings (the path sent, from the frames heard directly)
     own_frames = [item for band in bands.values() for item in band["own"]]

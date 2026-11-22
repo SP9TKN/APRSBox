@@ -95,3 +95,77 @@ def test_findu_is_an_extra_that_may_be_missing() -> None:
     assert without["findu"] == {"ok": False, "off": True}
     assert with_findu["bands"] == without["bands"]
     assert analyze_station("not a call")["error"] == "invalid_call"
+
+
+def _edges(result: dict) -> dict:
+    return {(edge["layer"], edge["a"], edge["b"]): (edge["n"], edge["uncertain"], edge["direct"])
+            for edge in result["route_map"]["edges"]}
+
+
+def test_route_map_draws_who_heard_the_station_and_whose_frames_it_repeated(monkeypatch) -> None:
+    from app.desktop import station_analysis
+
+    real = station_analysis._known_stations
+
+    def with_digis():
+        positions, stations = real()
+        positions.update({"SR9XSR": (50.02, 19.15), "SP9XDG": (50.26, 19.92), "SR9IGT": (50.0, 19.0)})
+        return positions, stations
+
+    monkeypatch.setattr(station_analysis, "_known_stations", with_digis)
+    with station_data():
+        frame(30, "SP9ABC>APRS,WIDE2-2:!5006.00N/01830.00E-QTH")
+        frame(29.9, "SP9ABC>APRS,SR9XSR*,WIDE2-1:!5006.00N/01830.00E-QTH")
+        frame(20, "SP9ABC>APRS,SR9XSR*,WIDE2-1:!5006.00N/01830.00E-QTH 2")
+        frame(10, "SP9ABC>APRS,SP9XDG,WIDE1,WIDE2*:>through an unknown digipeater after SP9XDG")
+        frame(15, "SP9XYZ>APRS,SP9ABC*,WIDE2-1:!5010.00N/01850.00E-x")  # SP9ABC repeated SP9XYZ
+        frame(12, "SP9ABC>APRS,WIDE1-1,qAR,SR9IGT:!5006.00N/01830.00E-QTH", kind="aprsis")
+        result = station_analysis.analyze_station("SP9ABC", hours=1)
+    assert _edges(result) == {
+        ("own", "SP9ABC", "SP9TKN"): (1, False, True),
+        ("own", "SP9ABC", "SR9XSR"): (2, False, False),
+        ("own", "SR9XSR", "SP9TKN"): (2, False, True),
+        ("own", "SP9ABC", "SP9XDG"): (1, False, False),
+        ("own", "SP9XDG", "SP9TKN"): (1, True, True),  # the unknown digipeater is bridged: dashed
+        ("digi", "SP9XYZ", "SP9ABC"): (1, False, False),
+        ("aprsis", "SP9ABC", "SR9IGT"): (1, False, False),
+    }
+    route_map = result["route_map"]
+    assert route_map["focus"] == "SP9ABC" and route_map["own"] == "SP9TKN"
+    assert abs(route_map["nodes"]["SP9ABC"]["lat"] - 50.1) < 1e-4  # from its own frames
+    assert abs(route_map["nodes"]["SP9XYZ"]["lon"] - (18 + 50 / 60)) < 1e-4  # from the frame it repeated
+    assert route_map["layers"] == {"network": 0, "digi": 1, "aprsis": 1, "own": 5}
+    assert route_map["edges"][0]["layer"] == "digi"  # drawn first, the station's own routes on top
+
+
+def test_route_map_of_the_own_station_shows_the_whole_network() -> None:
+    from app.desktop.station_analysis import analyze_station
+
+    with station_data() as root:
+        frame(20, "SR9XSR>APRS,WIDE2-1:!5007.15N/01909.11E#digi")
+        frame(19, "SP9XW>APRS,SR9XSR*,WIDE2-1:!5021.48N/01955.30E-x")
+        frame(18, "SP9TKN>APRS,SR9XSR*:!5005.67N/01940.55E#me")  # our own frame heard back
+        frame(17, "SP9XW>APRS,SP9TKN*,WIDE2-1:!5021.48N/01955.30E-x", direction="tx")  # we repeated it
+        frame(16, "SR9XSR>APRS,WIDE1-1:}DL1ABC>APRS,TCPIP,SR9XSR*::SP9TKN   :hi")  # third-party: no route
+        old = datetime.now(timezone.utc) - timedelta(hours=3)  # before the retention: the daily log
+        log = root / "logs" / "traffic" / "APRS 2M" / f"{old:%Y-%m-%d}.log"
+        log.parent.mkdir(parents=True)
+        log.write_text("# APRSBox traffic log: APRS 2M\n"
+                       f"{old:%Y-%m-%d %H:%M:%S} RX        SQ9AAA>APRS,SR9XSR*,WIDE2-1:!5000.00N/01900.00E-x\n"
+                       f"{old:%Y-%m-%d %H:%M:%S} TX        SQ9AAA>APRS,SP9TKN*,WIDE2-1:!5000.00N/01900.00E-x\n",
+                       encoding="utf-8")
+        result = analyze_station("SP9TKN", hours=6)
+        other = analyze_station("SP9XW", hours=6)
+    edges = _edges(result)
+    assert {key: value for key, value in edges.items() if key[0] == "network"} == {
+        ("network", "SR9XSR", "SP9TKN"): (3, False, True),
+        ("network", "SP9XW", "SR9XSR"): (1, False, False),
+        ("network", "SQ9AAA", "SR9XSR"): (1, False, False),
+    }
+    assert edges[("own", "SP9TKN", "SR9XSR")] == (1, False, False)
+    assert edges[("own", "SR9XSR", "SP9TKN")] == (1, False, True)
+    assert edges[("digi", "SP9XW", "SP9TKN")] == (1, False, False)
+    assert edges[("digi", "SQ9AAA", "SP9TKN")] == (1, False, False)
+    bands = next(edge["bands"] for edge in result["route_map"]["edges"] if edge["layer"] == "network" and edge["a"] == "SR9XSR")
+    assert bands == {"APRS 2M": 3}
+    assert not any(key[0] == "network" for key in _edges(other))  # only the own station gets the network
